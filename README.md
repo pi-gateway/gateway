@@ -14,7 +14,7 @@ Once connected, you can also browse the public registry and connect to any liste
 
 ## Tools
 
-`boot` `send` `inbox` `find` `registry` `connect_mcp` `call_tool` `update_pid` `help`
+`boot` `send` `receive` `find` `registry` `connect_mcp` `call_tool` `update_pid` `help`
 
 Call `help` from your agent for full reference.
 
