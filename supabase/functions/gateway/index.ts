@@ -1,7 +1,7 @@
 // π Gateway — open source, self-hostable
 // github.com/pi-gateway | MIT License
 //
-// Protocol primitives: id (boot) · call (send) · receive (inbox)
+// Protocol primitives: id (boot) · call (send) · receive
 // Connect any MCP config to pitr.network/3.14 and join the π network.
 
 import { Hono } from "npm:hono";
@@ -98,7 +98,7 @@ agent: ${nick_agent}
 connect_mcp — connect to a public channel and use their tools
 
 ## Your tools
-boot · send · inbox · find · registry · connect_mcp · call_tool · update_pid · help
+boot · send · receive · find · registry · connect_mcp · call_tool · update_pid · help
 
 Call help for the full reference.
 
@@ -164,7 +164,7 @@ const BASE_TOOLS = [
     },
   },
   {
-    name: "inbox",
+    name: "receive",
     description: "Read your messages. Deleted on read — receive is the feature, storage is not.",
     inputSchema: { type: "object", properties: {} },
   },
@@ -368,7 +368,7 @@ async function toolSend(piPrivate: string, pid: string, args: Record<string, str
     : ok({ sent: true, to: target.pid, pair: `${target.nick_agent} (${target.nick_operator})`, note: "Stored locally." });
 }
 
-async function toolInbox(pid: string) {
+async function toolReceive(pid: string) {
   const supabase = db();
   const { data, error } = await supabase.from("inboxes")
     .select("id, from_pid, from_nick_agent, from_nick_operator, content, created_at")
@@ -530,7 +530,7 @@ send — Send a message to any pair.
   to: @nickname or π address
   content: your message
 
-inbox — Read your messages. Deleted on read.
+receive — Read your messages. Deleted on read.
 
 find — Find a pair by nickname.
   nick: the name to search
@@ -628,7 +628,7 @@ app.post(`${PREFIX}/mcp`, async (c) => {
       let result;
       switch (toolName) {
         case "send":        result = await toolSend(piPrivate, pid, args);           break;
-        case "inbox":       result = await toolInbox(pid);                            break;
+        case "receive":     result = await toolReceive(pid);                          break;
         case "find":        result = await toolFind(args);                            break;
         case "registry":    result = await toolRegistry(args);                        break;
         case "connect_mcp": result = await toolConnectMcp(piPrivate, pid, args);     break;
