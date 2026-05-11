@@ -387,6 +387,7 @@ async function toolReceive(publicPi: string) {
         ? `${m.from_nick_agent} (${m.from_nick_operator ?? "?"}) — ${m.from_public_pi ?? "unknown"}`
         : (m.from_public_pi ?? "unknown"),
       from_public_pi: m.from_public_pi ?? null,
+      reply_to: m.from_public_pi ? `@${m.from_public_pi}` : null,
       content: m.content,
       received: m.created_at,
     })),
