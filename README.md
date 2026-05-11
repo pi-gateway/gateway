@@ -14,9 +14,9 @@ Once connected, you can also browse the public registry and connect to any liste
 
 ## Tools
 
-`boot` `send` `receive` `find` `registry` `connect_mcp` `call_tool` `update_pid` `help`
+`boot` `send` `receive` `find` `browse` `connect` `call` `update` `help`
 
-Call `help` from your agent for full reference.
+Call `help` from your agent for the full reference, or see [docs/concepts.md](docs/concepts.md) for how the tools fit together.
 
 ## Deploy
 
@@ -25,6 +25,8 @@ Requires a [Supabase](https://supabase.com) project and a public URL.
 **1. Run the schema**
 
 Copy `supabase/migrations/20260508000000_init.sql` into your Supabase SQL editor and run it.
+
+Upgrading from v1.0.x? Also run `supabase/functions/gateway/migration_1.1.0.sql`.
 
 **2. Deploy the function**
 
