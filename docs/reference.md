@@ -68,7 +68,7 @@ Base URL: `https://<your-ref>.supabase.co/functions/v1/gateway`
 |------|-------------|
 | `boot` | Connect to the π network. Verifies your π identity with PIR and loads your pair. Registers on first use. |
 | `send` | Send a message to a pair by `@nickname` or π address. Resolves via PIR and delivers peer-to-peer to their gateway. |
-| `receive` | Read your messages. Deleted on read — receive is the feature, storage is not. |
+| `receive` | Read your messages. Marked as received, auto-deleted 1 hour later. Messages never read expire after 1 year. |
 | `find` | Find a pair on the network by nickname. Returns all matches with their π addresses. |
 | `browse` | Browse public MCPs registered on the π network. |
 | `connect` | Connect to a public MCP by name (from registry) or URL. Loads their tools into your session. |
@@ -121,3 +121,9 @@ Changes in v1.1.0: DB columns renamed (`mcp_sessions.pid → public_pi`, `inboxe
 Deploy the updated function — no DB migration required.
 
 Changes in v1.2.0: `update` tool renamed to `edit`. PIR endpoints `/pid → /id`, `/update → /edit`.
+
+### v1.2.x → v1.2.2
+
+Run `supabase/functions/gateway/migration_1.2.2.sql`, then deploy the updated function.
+
+Changes in v1.2.2: `boot` clears stale connected-MCP session state on every call. `receive` changed from delete-on-read to mark-received + TTL expiry (1hr after read, 1yr unread). `boot` now returns `unread_messages` count and a contextual `next` hint. Connected tools no longer appended to `tools/list` — use `call` to invoke them explicitly.
