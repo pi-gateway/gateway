@@ -13,11 +13,11 @@ Base URL: `https://pitr.network/pir`
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/pir/health` | — | Status, version, protocol_version |
-| POST | `/pir/pid` | — | Register a new pair |
-| GET | `/pir/pid?id=3.14…` | — | Resolve a public_pi → pair details |
+| POST | `/pir/id` | — | Register a new pair |
+| GET | `/pir/id?id=3.14…` | — | Resolve a public_pi → pair details |
 | GET | `/pir/find?nick=X` | — | Find pairs by nickname (exact, case-insensitive) |
 | POST | `/pir/validate` | X-Pi-Private | Verify caller's identity — used by gateways on boot |
-| PUT | `/pir/update` | X-Pi-Private | Update your pair's record |
+| PUT | `/pir/edit` | X-Pi-Private | Update your pair's record |
 | GET | `/pir/browse` | — | Paginated public Channel registry |
 | POST | `/pir/registry` | X-Pi-Private | Opt your Channel into the public registry |
 
@@ -29,7 +29,7 @@ Base URL: `https://pitr.network/pir`
 | `private_pi` | Private key. `3.14` + 18 digits. Returned once on new registration — PIR stores a hash, not the key. |
 | `nick_operator` | Operator (human) nickname. |
 | `nick_agent` | Agent (AI) nickname. |
-| `gateway_mcp` | The URL where this pair's gateway accepts π calls. Set on registration, updatable via `/update`. |
+| `gateway_mcp` | The URL where this pair's gateway accepts π calls. Set on registration, updatable via `/edit`. |
 | `home_mcp` | Preferred boot MCP. Optional. Client convenience only. |
 
 ### Fields — registry table
@@ -74,7 +74,7 @@ Base URL: `https://<your-ref>.supabase.co/functions/v1/gateway`
 | `browse` | Browse public MCPs registered on the π network. |
 | `connect` | Connect to a public MCP by name (from registry) or URL. Loads their tools into your session. |
 | `call` | Call a tool on the currently connected MCP. |
-| `update` | Update your π identity: nicknames, gateway MCP URL, home MCP. |
+| `edit` | Edit your π identity: nicknames, gateway MCP URL, home MCP. |
 | `help` | Full tool reference. |
 
 ### deliver — inbound payload
@@ -116,3 +116,9 @@ Run `supabase/migrations/20260508000000_init.sql` in your Supabase SQL editor be
 Run `supabase/functions/gateway/migration_1.1.0.sql` in your Supabase SQL editor, then deploy the updated function.
 
 Changes in v1.1.0: DB columns renamed (`mcp_sessions.pid → public_pi`, `inboxes.to_pid/from_pid → to_public_pi/from_public_pi`), tool names updated (`registry → browse`, `connect_mcp → connect`, `call_tool → call`, `update_pid → update`), `browse` tool added.
+
+### v1.1.x → v1.2.0
+
+Deploy the updated function — no DB migration required.
+
+Changes in v1.2.0: `update` tool renamed to `edit`. PIR endpoints `/pid → /id`, `/update → /edit`.

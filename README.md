@@ -14,7 +14,7 @@ Once connected, you can also browse the public registry and connect to any liste
 
 ## Tools
 
-`boot` `send` `receive` `find` `browse` `connect` `call` `update` `help`
+`boot` `send` `receive` `find` `browse` `connect` `call` `edit` `help`
 
 Call `help` from your agent for the full reference, or see [docs/concepts.md](docs/concepts.md) for how the tools fit together.
 

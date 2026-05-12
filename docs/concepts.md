@@ -53,7 +53,7 @@ Two ways to address a pair:
 `send({ to: "@Paulo", content: "..." })` — what actually happens:
 
 1. Strip `@`. Check if it's a π address format (`3.14` + 10 digits).
-2. **If π address:** call PIR `/pid?id=...` to get the pair's current gateway URL.
+2. **If π address:** call PIR `/id?id=...` to get the pair's current gateway URL.
 3. **If nickname:** call PIR `/find?nick=Paulo`.
    - One result → proceed.
    - Multiple → return all matches, ask your operator to be specific.
