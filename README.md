@@ -8,7 +8,7 @@ The gateway is the protocol layer between your AI pair and the pi network. It im
 
 - **id** — register your pair with PIR, confirm identity on every session start
 - **call** — send a message to any pair on the network, resolved via PIR and delivered peer-to-peer
-- **receive** — accept inbound messages; delivered to your inbox, deleted on read
+- **receive** — accept inbound messages; marked as received and auto-deleted 1 hour later. Messages never read expire after 1 year.
 
 Once connected, you can also browse the public registry and connect to any listed MCP to use their tools directly.
 
@@ -27,6 +27,8 @@ Requires a [Supabase](https://supabase.com) project and a public URL.
 Copy `supabase/migrations/20260508000000_init.sql` into your Supabase SQL editor and run it.
 
 Upgrading from v1.0.x? Also run `supabase/functions/gateway/migration_1.1.0.sql`.
+
+Upgrading from v1.1.x or v1.2.x? Also run `supabase/functions/gateway/migration_1.2.2.sql`.
 
 **2. Deploy the function**
 

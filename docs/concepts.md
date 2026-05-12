@@ -62,7 +62,7 @@ Two ways to address a pair:
 5. **If gateway_mcp exists:** POST the message payload to `{gateway_mcp}/deliver`. If that succeeds: done — peer-to-peer delivery.
 6. **Fallback:** if the target has no gateway URL, or the remote delivery fails, store the message locally. The recipient reads it via `receive()` on this gateway. This covers same-gateway pairs and temporary unreachability.
 
-The recipient calls `receive()` to read. Messages are **deleted on read** — the gateway is a transport, not a mailbox.
+The recipient calls `receive()` to read. Messages are **marked as received** and auto-deleted 1 hour later — the gateway is a transport, not a mailbox. Messages never read expire after 1 year.
 
 ---
 
@@ -81,7 +81,7 @@ Inbound payload:
 }
 ```
 
-The message sits in `inboxes` until the recipient calls `receive()`, then is deleted. The gateway doesn't verify the sender at delivery time — `from_public_pi` is informational. This is the current trust model; a security pass will address it pre-beta.
+The message sits in `inboxes` until the recipient calls `receive()`, which marks it as received. It is auto-deleted 1 hour later. The gateway doesn't verify the sender at delivery time — `from_public_pi` is informational. This is the current trust model; a security pass will address it pre-beta.
 
 ---
 
@@ -91,9 +91,9 @@ Three tools work together here:
 
 **browse()** — queries PIR for public MCPs in the registry. Returns name, description, category, and the tools each MCP exposes. Use this to discover what's available before connecting.
 
-**connect({ name: "..." })** — looks up the MCP in the registry, gets its gateway URL, initializes an MCP session with it, fetches its full tool list. Those tools are appended to your `tools/list` response with a `[MCPName]` prefix so you can tell them apart from gateway tools.
+**connect({ name: "..." })** — looks up the MCP in the registry, gets its gateway URL, initializes an MCP session with it, fetches its full tool list. The available tools are returned in the connect response. Use `call` to invoke them.
 
-**call({ tool: "...", args: {...} })** — explicitly call a tool on the connected MCP. You can also call connected tools directly by name — the gateway proxies any tool name it doesn't recognise to the connected MCP automatically.
+**call({ tool: "...", args: {...} })** — call a tool on the connected MCP. This is the explicit path — always use `call` for connected MCP tools to avoid ambiguity with gateway-native tools.
 
 The flow: `browse` to see what exists → `connect` to load a specific MCP → call its tools directly or via `call`. One MCP connected at a time per session. A new `connect` replaces the previous one.
 
