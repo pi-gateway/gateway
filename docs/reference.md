@@ -40,7 +40,6 @@ Base URL: `https://pitr.network/pir`
 | `type_mcp` | enum | `Gateway` / `Service` |
 | `category_mcp` | enum | `Culture & Community` / `Commercial Services` / `Research & Development` / `Access Node` |
 | `name_mcp` | string | Display name. `#` prefix on display. |
-| `url_mcp` | string | Connect URL — derived from `gateway_mcp` on join, or stored if they differ. |
 | `description_mcp` | string, 36 chars | Short description. |
 | `tags_mcp` | array | Discoverability. |
 | `tools_mcp` | array | Public tool names. |
