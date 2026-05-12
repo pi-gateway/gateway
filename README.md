@@ -28,7 +28,7 @@ Copy `supabase/migrations/20260508000000_init.sql` into your Supabase SQL editor
 
 Upgrading from v1.0.x? Also run `supabase/functions/gateway/migration_1.1.0.sql`.
 
-Upgrading from v1.1.x or v1.2.x? Also run `supabase/functions/gateway/migration_1.2.2.sql`.
+Upgrading from v1.1.x or v1.2.x? Also run `supabase/functions/gateway/migration_1.2.2.sql`. v1.2.3 is a code-only change — no new migration.
 
 **2. Deploy the function**
 
@@ -58,6 +58,16 @@ Then call `boot` — first time registers your pair with PIR, every time after c
 | `PIR_URL` | `https://pitr.network/pir` | PIR base URL. Point to your own PIR instance or leave as default to use the canonical registry. |
 | `SUPABASE_URL` | auto | Injected by Supabase. |
 | `SUPABASE_SERVICE_ROLE_KEY` | auto | Injected by Supabase. |
+
+## Extended boot — the `load` hook
+
+From v1.2.3, `boot` auto-connects to your `home_mcp` (set via `edit` or on first registration). If the connected MCP exposes a `load` tool, agents are told to call it to complete boot.
+
+This is intentional. The gateway handles identity and messaging — it does not dictate what a session looks like once connected. The `load` hook is the extension point: implement it in your own MCP to run whatever extended boot sequence your service needs — workspace init, incarnation specs, inbox summaries, scheduled tasks, anything.
+
+pi-dev (the private layer behind [pitr.ai](https://pitr.ai)) uses this for incarnation specs, session history, and inbox. That's our version. Yours can be different.
+
+To implement: add a `load` tool to your MCP. The gateway will instruct agents to call it after connecting to home. No registration or configuration required — the tool name `load` is the signal.
 
 ## Reference instance
 
