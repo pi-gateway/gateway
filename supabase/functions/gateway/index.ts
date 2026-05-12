@@ -10,7 +10,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
 
 const app = new Hono();
 const PREFIX = "/gateway";
-const GATEWAY_VERSION = "1.2.2";
+const GATEWAY_VERSION = "1.2.3";
 const PROTOCOL_VERSION = "1.0";
 const PIR = Deno.env.get("PIR_URL") ?? "https://pitr.network/pir";
 
@@ -236,6 +236,42 @@ const BASE_TOOLS = [
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
+// Shared: fetch tools from a remote MCP URL and store in session.
+async function connectToMcp(
+  supabase: any,
+  publicPi: string,
+  piPrivate: string,
+  targetUrl: string,
+  targetName: string,
+  table: string,
+): Promise<{ tools: any[]; hasLoad: boolean }> {
+  try {
+    await fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-gateway", version: GATEWAY_VERSION } },
+      }),
+    });
+    const toolsRes = await fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+    });
+    const tools: any[] = toolsRes.ok ? ((await toolsRes.json())?.result?.tools ?? []) : [];
+    await supabase.from(table).update({
+      connected_url:   targetUrl,
+      connected_name:  targetName,
+      connected_tools: tools,
+      last_seen:       new Date().toISOString(),
+    }).eq("public_pi", publicPi);
+    return { tools, hasLoad: tools.some((t: any) => t.name === "load") };
+  } catch (_) {
+    return { tools: [], hasLoad: false };
+  }
+}
+
 async function toolBoot(piPrivate: string, args: Record<string, string>) {
   const supabase = db();
   const publicPi = toPublicPi(piPrivate);
@@ -265,21 +301,33 @@ async function toolBoot(piPrivate: string, args: Record<string, string>) {
       .eq("to_public_pi", publicPi)
       .is("received_at", null);
 
-    const connectArg = homeMcp?.startsWith("http")
-      ? `connect({ url: "${homeMcp}" })`
-      : `connect({ name: "${homeMcp}" })`;
+    // Auto-connect to home_mcp if set — agent shouldn't need to call connect manually
+    let homeConnected = false;
+    let homeHasLoad   = false;
+    if (homeMcp) {
+      const targetUrl = homeMcp.startsWith("http") ? homeMcp : null;
+      if (targetUrl) {
+        const result = await connectToMcp(supabase, publicPi, piPrivate, targetUrl, targetUrl, "mcp_sessions");
+        homeConnected = result.tools.length > 0;
+        homeHasLoad   = result.hasLoad;
+      }
+    }
+
     const nextParts: string[] = [];
-    if (homeMcp) nextParts.push(`Home is "${homeMcp}" — call ${connectArg} to load it.`);
+    if (homeMcp && homeHasLoad)   nextParts.push("Home loaded. Call load() to complete boot.");
+    if (homeMcp && !homeHasLoad && homeConnected) nextParts.push("Home tools loaded.");
+    if (homeMcp && !homeConnected) nextParts.push(`Could not reach home MCP — call connect({ url: "${homeMcp}" }) to retry.`);
     if (unreadCount) nextParts.push(`${unreadCount} message(s) waiting — call receive to read.`);
     if (!nextParts.length) nextParts.push("You are on the π network. Call help for tools.");
 
     return ok({
-      status: "connected",
-      identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
-      home_mcp: homeMcp,
+      status:          "connected",
+      identity:        { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
+      home_mcp:        homeMcp,
+      home_connected:  homeConnected,
       unread_messages: unreadCount ?? 0,
-      spec: buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-      next: nextParts.join(" "),
+      spec:            buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
+      next:            nextParts.join(" "),
     });
   }
 
@@ -452,45 +500,16 @@ async function toolConnect(piPrivate: string, publicPi: string, args: Record<str
     return fail("Provide name (from registry) or url (direct MCP URL).");
   }
 
-  try {
-    // Initialize MCP session with target
-    await fetch(targetUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "initialize",
-        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-gateway", version: GATEWAY_VERSION } },
-      }),
-    });
-
-    // Fetch tool list
-    const toolsRes = await fetch(targetUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
-    });
-
-    const tools: any[] = toolsRes.ok ? ((await toolsRes.json())?.result?.tools ?? []) : [];
-
-    await supabase.from("mcp_sessions").update({
-      connected_url:   targetUrl,
-      connected_name:  targetName,
-      connected_tools: tools,
-      last_seen:       new Date().toISOString(),
-    }).eq("public_pi", publicPi);
-
-    const hasLoad = tools.some((t: any) => t.name === "load");
-    return ok({
-      connected: targetName,
-      url: targetUrl,
-      tools: tools.map((t: any) => ({ name: t.name, description: t.description })),
-      next: hasLoad
-        ? `Connected to ${targetName}. Call load() to initialize your session.`
-        : `Tools from ${targetName} are now available. Call them directly or use call({ tool: "...", args: {...} }).`,
-    });
-  } catch (e) {
-    return fail(`Could not connect to ${targetUrl}.`, String(e));
-  }
+  const result = await connectToMcp(supabase, publicPi, piPrivate, targetUrl!, targetName!, "mcp_sessions");
+  if (!result.tools.length) return fail(`Could not connect to ${targetUrl}.`);
+  return ok({
+    connected: targetName,
+    url: targetUrl,
+    tools: result.tools.map((t: any) => ({ name: t.name, description: t.description })),
+    next: result.hasLoad
+      ? `Connected to ${targetName}. Call load() to initialize your session.`
+      : `Tools from ${targetName} are now available. Call them directly or use call({ tool: "...", args: {...} }).`,
+  });
 }
 
 async function toolCall(piPrivate: string, publicPi: string, args: Record<string, unknown>) {
