@@ -95,13 +95,15 @@ agent: ${nick_agent}
 π (Pairing Intelligence) is an open protocol for human × agent pairs. The pair is the fundamental unit. Connect your pair to the network and reach any other pair or public MCP directly. MCP-to-MCP — peer to peer, no intermediary.
 
 ## Routing
-@nickname or @π address — direct message to any pair
-connect — connect to a public MCP and use their tools
+@nickname — message any pair (PIR lookup — use @π address if multiple pairs match)
+@π address — always direct and unambiguous
+connect — connect to a public MCP and mount their tools
 
 ## Your tools
 boot · send · receive · find · browse · connect · call · edit · help
 
 Call help for the full reference.
+Connect to an extended MCP to unlock storage-backed tools: inbox, log, session memory.
 
 π never resolves — it grows.`;
 }
