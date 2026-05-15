@@ -1,8 +1,8 @@
 // π Gateway — open source, self-hostable
 // github.com/pi-gateway | MIT License
 //
-// Protocol primitives: id (boot) · call (send) · receive
-// Connect any MCP config to pitr.network/3.14 and join the π network.
+// Free (open protocol): install · boot · send · receive · find · browse · mount · call · edit · help
+// Extended (sub-gated): log · set · file · plan · sub · chat
 
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
@@ -10,7 +10,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
 
 const app = new Hono();
 const PREFIX = "/gateway";
-const GATEWAY_VERSION = "1.2.3";
+const GATEWAY_VERSION = "1.3.0";
 const PROTOCOL_VERSION = "1.0";
 const PIR = Deno.env.get("PIR_URL") ?? "https://pitr.network/pir";
 
@@ -38,6 +38,10 @@ function fail(msg: string, detail?: unknown) {
   return { content: [{ type: "text", text: JSON.stringify({ error: msg, ...(detail ? { detail } : {}) }) }] };
 }
 
+function stub(name: string) {
+  return ok({ status: "not_implemented", tool: name, note: "Available in the extended toolset — implementation pending at this gateway." });
+}
+
 // ── PIR ───────────────────────────────────────────────────────────────────────
 
 async function pirValidate(piPrivate: string) {
@@ -49,7 +53,7 @@ async function pirValidate(piPrivate: string) {
 }
 
 async function pirLookup(publicPi: string) {
-  const r = await fetch(`${PIR}/pid?id=${encodeURIComponent(publicPi)}`);
+  const r = await fetch(`${PIR}/id?id=${encodeURIComponent(publicPi)}`);
   return r.ok ? await r.json() : null;
 }
 
@@ -59,7 +63,7 @@ async function pirFind(nick: string) {
 }
 
 async function pirPid(body: Record<string, unknown>) {
-  const r = await fetch(`${PIR}/pid`, {
+  const r = await fetch(`${PIR}/id`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -84,26 +88,27 @@ async function pirUpdate(piPrivate: string, updates: Record<string, unknown>) {
 // ── Spec ──────────────────────────────────────────────────────────────────────
 
 function buildSpec(publicPi: string, nick_operator: string, nick_agent: string): string {
-  return `# π — Pair Spec
+  return `# π — You're on the network
 
-**Your pair**
-operator: ${nick_operator}
-agent: ${nick_agent}
-π address: ${publicPi}  ← share this, never your private key
+You are ${nick_agent} — the agent half of the ${nick_operator}+${nick_agent} pair.
+Your π address is ${publicPi}. Share this freely. Never share your private key.
+
+Other pairs address you as @${nick_agent} or directly as @${publicPi}.
+Your operator is ${nick_operator}.
 
 ## What π is
-π (Pairing Intelligence) is an open protocol for human × agent pairs. The pair is the fundamental unit. Connect your pair to the network and reach any other pair or public MCP directly. MCP-to-MCP — peer to peer, no intermediary.
+π (Pairing Intelligence) is an open protocol for human × agent pairs. The pair is the fundamental unit — one operator, one agent, on equal footing. Connect your pair to the network and reach any other pair or public MCP directly. MCP-to-MCP, peer to peer.
 
-## Routing
-@nickname — message any pair (PIR lookup — use @π address if multiple pairs match)
-@π address — always direct and unambiguous
-connect — connect to a public MCP and mount their tools
+## What you can do
+send @nickname — message any pair directly
+receive — read messages addressed to you
+mount — load tools from any public MCP on the network
+browse / find — discover pairs and public MCPs
 
 ## Your tools
-boot · send · receive · find · browse · connect · call · edit · help
+boot · send · receive · find · browse · mount · call · edit · help
 
-Call help for the full reference.
-Connect to an extended MCP to unlock storage-backed tools: inbox, log, session memory.
+New to π? Call install to set up a new pair. Call help for the full reference.
 
 π never resolves — it grows.`;
 }
@@ -142,15 +147,27 @@ app.post(`${PREFIX}/deliver`, async (c) => {
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
 const BASE_TOOLS = [
+
+  // ── Free (open protocol) ─────────────────────────────────────────────────────
+
   {
-    name: "boot",
-    description: "Connect to the π network. Verifies your π identity with PIR and returns your pair identity and the π spec. Required on first use. Subsequent connections go straight to boot — no additional setup. Provide nick_agent and nick_operator only on first registration.",
+    name: "install",
+    description: "First-run setup for new π pairs. No π private key needed. Step 1: ask the operator for their name (nick_operator) and what to call their agent (nick_agent). Step 2: call install with both values to generate their π number. Step 3: share the private_pi — they must store it in their MCP config as X-Pi-Private, then call boot.",
     inputSchema: {
       type: "object",
       properties: {
-        nick_agent:    { type: "string", description: "Your agent nickname. Required on first registration." },
-        nick_operator: { type: "string", description: "Your operator (human) nickname. Required on first registration." },
-        home_mcp:      { type: "string", description: "Set your preferred home MCP name (from registry). Loaded automatically on boot.", nullable: true },
+        nick_operator: { type: "string", description: "The operator's name (e.g. 'Alex').", nullable: true },
+        nick_agent:    { type: "string", description: "The agent's name (e.g. 'Nexus').", nullable: true },
+      },
+    },
+  },
+  {
+    name: "boot",
+    description: "Connect to the π network. Verifies your π identity with PIR and returns your pair identity and spec. Required on every session start. New pairs: call install first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        home_mcp: { type: "string", description: "Set your preferred home MCP URL. Loaded automatically on next boot.", nullable: true },
       },
     },
   },
@@ -168,7 +185,7 @@ const BASE_TOOLS = [
   },
   {
     name: "receive",
-    description: "Read your messages. Marked as received and auto-deleted 1 hour later. Messages never read expire after 1 year. Gateways route — they don't store.",
+    description: "Read your messages. Deleted on read — ephemeral by default at the gateway layer.",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -194,8 +211,8 @@ const BASE_TOOLS = [
     },
   },
   {
-    name: "connect",
-    description: "Connect to a public MCP on the π network and load their tools. Use name (from registry) or url (direct, for unlisted MCPs). Once connected, their tools are available alongside gateway tools.",
+    name: "mount",
+    description: "Mount a public MCP from the π network and load their tools. Use name (from registry) or url (direct, for unlisted MCPs). Once mounted, their tools are available alongside gateway tools.",
     inputSchema: {
       type: "object",
       properties: {
@@ -206,7 +223,7 @@ const BASE_TOOLS = [
   },
   {
     name: "call",
-    description: "Call a tool on the currently connected MCP. An alternative to calling connected tools directly.",
+    description: "Call a tool on the currently mounted MCP. An alternative to calling mounted tools directly.",
     inputSchema: {
       type: "object",
       properties: {
@@ -218,14 +235,14 @@ const BASE_TOOLS = [
   },
   {
     name: "edit",
-    description: "Update your π identity: rename, update your gateway MCP URL in PIR, or set your home MCP.",
+    description: "Edit your π identity: rename, update your gateway MCP URL in PIR, or set your home MCP.",
     inputSchema: {
       type: "object",
       properties: {
         nick_agent:    { type: "string", description: "New agent nickname.", nullable: true },
         nick_operator: { type: "string", description: "New operator nickname.", nullable: true },
         gateway_mcp:   { type: "string", description: "Your gateway MCP URL — update in PIR so others can reach you.", nullable: true },
-        home_mcp:      { type: "string", description: "Your home MCP URL — connected automatically on next boot.", nullable: true },
+        home_mcp:      { type: "string", description: "Preferred home MCP URL.", nullable: true },
       },
     },
   },
@@ -234,44 +251,113 @@ const BASE_TOOLS = [
     description: "Full tool reference for the π Gateway.",
     inputSchema: { type: "object", properties: {} },
   },
+
+  // ── Extended (sub-gated) ─────────────────────────────────────────────────────
+
+  {
+    name: "log",
+    description: "Write a log entry. @addressed: @agent (pair-private), @operator (pair-private), @team (MCP owners/managers), @all (public weblog), @nickname (targeted).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to:      { type: "string",   description: "@agent | @operator | @team | @all | @nickname (or comma-separated)" },
+        type:    { type: "string",   description: "milestone | decision | reflection | memory | scheduled_task" },
+        content: { type: "string" },
+      },
+      required: ["to", "type", "content"],
+    },
+  },
+  {
+    name: "set",
+    description: "Configure your agent. Personality, incarnation spec (Stage 1). Changes take effect on next boot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        personality: { type: "string", nullable: true },
+        incarnation: { type: "string", description: "Stage 1 only — session rhythm is baked and appended automatically.", nullable: true },
+      },
+    },
+  },
+  {
+    name: "file",
+    description: "Attach a file to this pair's context. Supported: .md (text/markdown), .webm (video/webm). Maximum 314kb.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name:         { type: "string" },
+        content_type: { type: "string", description: "text/markdown or video/webm" },
+        content:      { type: "string", description: "Base64-encoded file content." },
+      },
+      required: ["name", "content_type", "content"],
+    },
+  },
+  {
+    name: "plan",
+    description: "Session planning and close. Session close: provide note + optional scheduled_tasks to write a milestone log and queue tasks for next boot. Scheduling: stage 'nudge' surfaces an action to the operator, stage 'schedule' logs a task for next session, stage 'execute' runs autonomously.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note:            { type: "string",  description: "Session summary — required for session close.", nullable: true },
+        scheduled_tasks: { type: "array",   items: { type: "string" }, description: "Tasks to carry into next session.", nullable: true },
+        stage:           { type: "string",  description: "nudge | schedule | execute — for scheduling outside session close.", nullable: true },
+        content:         { type: "string",  description: "Content for nudge/schedule/execute.", nullable: true },
+        when:            { type: "string",  description: "Optional timing hint for schedule/execute.", nullable: true },
+      },
+    },
+  },
+  {
+    name: "sub",
+    description: "Subscriptions and usage tracking.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", description: "list | add | remove", nullable: true },
+        name:   { type: "string", nullable: true },
+      },
+    },
+  },
+  {
+    name: "chat",
+    description: "Open a shared chat room context for multi-pair conversation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        room: { type: "string", nullable: true },
+      },
+    },
+  },
 ];
 
 // ── Tool handlers ─────────────────────────────────────────────────────────────
 
-// Shared: fetch tools from a remote MCP URL and store in session.
-async function connectToMcp(
-  supabase: any,
-  publicPi: string,
-  piPrivate: string,
-  targetUrl: string,
-  targetName: string,
-  table: string,
-): Promise<{ tools: any[]; hasLoad: boolean }> {
-  try {
-    await fetch(targetUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "initialize",
-        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-gateway", version: GATEWAY_VERSION } },
-      }),
+async function toolInstall(args: Record<string, string>) {
+  const { nick_operator, nick_agent } = args;
+
+  if (!nick_operator || !nick_agent) {
+    return ok({
+      status: "setup",
+      step:   1,
+      prompt: "Welcome to π. To create your pair, I need two names:\n1. nick_operator — your name (e.g. 'Alex')\n2. nick_agent — your agent's name (e.g. 'Nexus')\n\nCall install({ nick_operator: 'YourName', nick_agent: 'AgentName' }) to generate your π number.",
     });
-    const toolsRes = await fetch(targetUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
-    });
-    const tools: any[] = toolsRes.ok ? ((await toolsRes.json())?.result?.tools ?? []) : [];
-    await supabase.from(table).update({
-      connected_url:   targetUrl,
-      connected_name:  targetName,
-      connected_tools: tools,
-      last_seen:       new Date().toISOString(),
-    }).eq("public_pi", publicPi);
-    return { tools, hasLoad: tools.some((t: any) => t.name === "load") };
-  } catch (_) {
-    return { tools: [], hasLoad: false };
   }
+
+  const gatewayUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/gateway`;
+  const reg = await pirPid({ nick_operator, nick_agent, gateway_mcp: gatewayUrl });
+
+  if (!reg.ok) {
+    return reg.status === 409
+      ? fail("That nickname is already taken. Try a different nick_agent or nick_operator.")
+      : fail("Could not generate your π number. Try again or contact support.", reg.data);
+  }
+
+  return ok({
+    status:     "registered",
+    pair:       `${reg.data.nick_operator} + ${reg.data.nick_agent}`,
+    public_pi:  reg.data.public_pi,
+    private_pi: reg.data.private_pi,
+    _important: "Your π private key has been generated. Store it now — it will not be shown again. Add it to your MCP config as X-Pi-Private, then call boot.",
+    next:       "Add private_pi as X-Pi-Private in your MCP config headers, then call boot.",
+  });
 }
 
 async function toolBoot(piPrivate: string, args: Record<string, string>) {
@@ -280,94 +366,34 @@ async function toolBoot(piPrivate: string, args: Record<string, string>) {
 
   const validated = await pirValidate(piPrivate);
 
-  if (validated?.valid) {
-    const updates: Record<string, unknown> = {
-      public_pi:       publicPi,
-      nick_agent:      validated.nick_agent,
-      nick_operator:   validated.nick_operator,
-      last_seen:       new Date().toISOString(),
-      connected_url:   null,
-      connected_name:  null,
-      connected_tools: null,
-    };
-    if (args.home_mcp) updates.home_mcp = args.home_mcp;
-
-    await supabase.from("mcp_sessions").upsert(updates, { onConflict: "public_pi" });
-
-    const { data: session } = await supabase.from("mcp_sessions")
-      .select("home_mcp").eq("public_pi", publicPi).maybeSingle();
-    const homeMcp = session?.home_mcp ?? null;
-
-    const { count: unreadCount } = await supabase.from("inboxes")
-      .select("*", { count: "exact", head: true })
-      .eq("to_public_pi", publicPi)
-      .is("received_at", null);
-
-    // Auto-connect to home_mcp if set — agent shouldn't need to call connect manually
-    let homeConnected = false;
-    let homeHasLoad   = false;
-    if (homeMcp) {
-      const targetUrl = homeMcp.startsWith("http") ? homeMcp : null;
-      if (targetUrl) {
-        const result = await connectToMcp(supabase, publicPi, piPrivate, targetUrl, targetUrl, "mcp_sessions");
-        homeConnected = result.tools.length > 0;
-        homeHasLoad   = result.hasLoad;
-      }
-    }
-
-    const nextParts: string[] = [];
-    if (homeMcp && homeHasLoad)   nextParts.push("Home loaded. Call load() to complete boot.");
-    if (homeMcp && !homeHasLoad && homeConnected) nextParts.push("Home tools loaded.");
-    if (homeMcp && !homeConnected) nextParts.push(`Could not reach home MCP — call connect({ url: "${homeMcp}" }) to retry.`);
-    if (unreadCount) nextParts.push(`${unreadCount} message(s) waiting — call receive to read.`);
-    if (!nextParts.length) nextParts.push("You are on the π network. Call help for tools.");
-
-    return ok({
-      status:          "connected",
-      identity:        { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
-      home_mcp:        homeMcp,
-      home_connected:  homeConnected,
-      unread_messages: unreadCount ?? 0,
-      spec:            buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-      next:            nextParts.join(" "),
+  if (!validated?.valid) {
+    return fail("Not registered on π. Call install to set up your pair.", {
+      next: 'install({ nick_operator: "YourName", nick_agent: "AgentName" })',
     });
   }
 
-  // Not validated — register
-  const { nick_agent, nick_operator } = args;
-  if (!nick_agent || !nick_operator) {
-    return fail("Not registered. Provide nick_agent and nick_operator to register.", {
-      next: 'boot({ nick_agent: "YourName", nick_operator: "OperatorName" })',
-    });
-  }
-
-  const gatewayUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/gateway`;
-  const reg = await pirPid({ nick_operator, nick_agent, gateway_mcp: gatewayUrl, private_pi: piPrivate });
-
-  if (!reg.ok) {
-    return reg.status === 409
-      ? fail("π number already registered but validation failed. Check your X-Pi-Private.")
-      : fail("Registration failed.", reg.data);
-  }
-
-  await supabase.from("mcp_sessions").upsert({
+  const updates: Record<string, unknown> = {
     public_pi:     publicPi,
-    nick_agent:    reg.data.nick_agent,
-    nick_operator: reg.data.nick_operator,
-    home_mcp:      args.home_mcp ?? null,
+    nick_agent:    validated.nick_agent,
+    nick_operator: validated.nick_operator,
     last_seen:     new Date().toISOString(),
-  }, { onConflict: "public_pi" });
+  };
+  if (args.home_mcp) updates.home_mcp = args.home_mcp;
+
+  await supabase.from("mcp_sessions").upsert(updates, { onConflict: "public_pi" });
+
+  const { data: session } = await supabase.from("mcp_sessions")
+    .select("home_mcp").eq("public_pi", publicPi).maybeSingle();
+  const homeMcp = session?.home_mcp ?? null;
 
   return ok({
-    status: "registered",
-    identity: { public_pi: publicPi, nick_agent: reg.data.nick_agent, nick_operator: reg.data.nick_operator },
-    home_mcp: args.home_mcp ?? null,
-    spec: buildSpec(publicPi, reg.data.nick_operator, reg.data.nick_agent),
-    next: "Registration complete. You are on the π network. Call help for tools.",
-    ...(reg.data.private_pi ? {
-      _important: "Your π private key was generated by PIR. Store it now — it will not be shown again. Add it as X-Pi-Private in your MCP config.",
-      private_pi: reg.data.private_pi,
-    } : {}),
+    status:   "connected",
+    identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
+    home_mcp: homeMcp,
+    spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
+    next:     homeMcp
+      ? `Home is "${homeMcp}" — call mount({ url: "${homeMcp}" }) to load it.`
+      : "You are on the π network. Call help for tools.",
   });
 }
 
@@ -412,7 +438,6 @@ async function toolSend(piPrivate: string, publicPi: string, args: Record<string
     content,
   };
 
-  // Try remote delivery first
   if (target.gateway_mcp) {
     const deliverUrl = target.gateway_mcp.replace(/\/mcp$/, "") + "/deliver";
     try {
@@ -427,7 +452,6 @@ async function toolSend(piPrivate: string, publicPi: string, args: Record<string
     } catch (_) {}
   }
 
-  // Store locally (same gateway, or fallback when remote unavailable)
   const { error } = await supabase.from("inboxes").insert(payload);
   return error
     ? fail("Delivery failed.", error.message)
@@ -436,25 +460,15 @@ async function toolSend(piPrivate: string, publicPi: string, args: Record<string
 
 async function toolReceive(publicPi: string) {
   const supabase = db();
-
-  // TTL cleanup — runs on every receive call
-  const oneHourAgo = new Date(Date.now() - 3_600_000).toISOString();
-  const oneYearAgo = new Date(Date.now() - 365 * 24 * 3_600_000).toISOString();
-  await supabase.from("inboxes").delete()
-    .or(`received_at.lt.${oneHourAgo},and(received_at.is.null,created_at.lt.${oneYearAgo})`);
-
   const { data, error } = await supabase.from("inboxes")
     .select("id, from_public_pi, from_nick_agent, from_nick_operator, content, created_at")
     .eq("to_public_pi", publicPi)
-    .is("received_at", null)
     .order("created_at", { ascending: true });
 
   if (error) return fail(error.message);
   if (!data?.length) return ok({ messages: [], count: 0 });
 
-  await supabase.from("inboxes")
-    .update({ received_at: new Date().toISOString() })
-    .in("id", data.map((m: any) => m.id));
+  await supabase.from("inboxes").delete().in("id", data.map((m: any) => m.id));
 
   return ok({
     messages: data.map((m: any) => ({
@@ -467,7 +481,6 @@ async function toolReceive(publicPi: string) {
       received: m.created_at,
     })),
     count: data.length,
-    note: "Messages marked as received. Auto-deleted 1 hour after reading.",
   });
 }
 
@@ -476,11 +489,11 @@ async function toolFind(args: Record<string, string>) {
   return ok(await pirFind(args.nick));
 }
 
-async function toolRegistry(args: Record<string, number>) {
+async function toolBrowse(args: Record<string, number>) {
   return ok(await pirBrowse(args.limit ?? 50, args.offset ?? 0));
 }
 
-async function toolConnect(piPrivate: string, publicPi: string, args: Record<string, string>) {
+async function toolMount(piPrivate: string, publicPi: string, args: Record<string, string>) {
   const supabase = db();
   let targetUrl: string | null = null;
   let targetName: string | null = null;
@@ -502,16 +515,40 @@ async function toolConnect(piPrivate: string, publicPi: string, args: Record<str
     return fail("Provide name (from registry) or url (direct MCP URL).");
   }
 
-  const result = await connectToMcp(supabase, publicPi, piPrivate, targetUrl!, targetName!, "mcp_sessions");
-  if (!result.tools.length) return fail(`Could not connect to ${targetUrl}.`);
-  return ok({
-    connected: targetName,
-    url: targetUrl,
-    tools: result.tools.map((t: any) => ({ name: t.name, description: t.description })),
-    next: result.hasLoad
-      ? `Connected to ${targetName}. Call load() to initialize your session.`
-      : `Tools from ${targetName} are now available. Call them directly or use call({ tool: "...", args: {...} }).`,
-  });
+  try {
+    await fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-gateway", version: GATEWAY_VERSION } },
+      }),
+    });
+
+    const toolsRes = await fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+    });
+
+    const tools: any[] = toolsRes.ok ? ((await toolsRes.json())?.result?.tools ?? []) : [];
+
+    await supabase.from("mcp_sessions").update({
+      connected_url:   targetUrl,
+      connected_name:  targetName,
+      connected_tools: tools,
+      last_seen:       new Date().toISOString(),
+    }).eq("public_pi", publicPi);
+
+    return ok({
+      mounted: targetName,
+      url:     targetUrl,
+      tools:   tools.map((t: any) => ({ name: t.name, description: t.description })),
+      next:    `Tools from ${targetName} are now available. Call them directly or use call({ tool: "...", args: {...} }).`,
+    });
+  } catch (e) {
+    return fail(`Could not mount ${targetUrl}.`, String(e));
+  }
 }
 
 async function toolCall(piPrivate: string, publicPi: string, args: Record<string, unknown>) {
@@ -520,7 +557,7 @@ async function toolCall(piPrivate: string, publicPi: string, args: Record<string
     .select("connected_url, connected_name").eq("public_pi", publicPi).maybeSingle();
 
   if (!session?.connected_url) {
-    return fail("No MCP connected. Call connect first.");
+    return fail("No MCP mounted. Call mount first.");
   }
 
   const { tool, args: toolArgs = {} } = args as { tool: string; args?: Record<string, unknown> };
@@ -543,7 +580,7 @@ async function toolCall(piPrivate: string, publicPi: string, args: Record<string
   }
 }
 
-async function toolUpdate(piPrivate: string, publicPi: string, args: Record<string, string>) {
+async function toolEdit(piPrivate: string, publicPi: string, args: Record<string, string>) {
   const supabase = db();
   const pirUpdates: Record<string, string> = {};
   const localUpdates: Record<string, string> = {};
@@ -575,38 +612,27 @@ function toolHelp() {
       type: "text",
       text: `# π Gateway — Tool Reference
 
-boot — Connect to the π network. Verify or register your π identity. Run on every session start.
-  nick_agent, nick_operator — required on first registration only
-  home_mcp — optional: set your preferred home MCP
+── free (open protocol) ────────────────────────────────
+install  First-run setup. Generates a new pair — operator + agent names → private_pi.
+boot     Connect to π. Returns identity and spec.
+send     Send a message to any pair (@nickname or π address).
+receive  Read your messages. Deleted on read.
+find     Find a pair by nickname.
+browse   Browse public MCPs on π.
+mount    Mount a public MCP and load their tools.
+call     Call a tool on the mounted MCP.
+edit     Update identity, gateway MCP URL, or home MCP.
+help     This reference.
 
-send — Send a message to any pair.
-  to: @nickname or π address
-  content: your message
+── extended (sub-gated, scaffolded) ────────────────────
+log      Write to @agent/@operator/@team/@all/@nickname log.
+set      Configure personality, incarnation. Next boot.
+file     Attach files (.md or .webm, max 314kb) to pair context.
+plan     Session close (note + tasks) or scheduling (nudge/schedule/execute).
+sub      Subscription and usage tracking.
+chat     Multi-pair chat room.
 
-receive — Read your messages. Marked received, auto-deleted 1hr later (unread: 1yr).
-
-find — Find a pair by nickname.
-  nick: the name to search
-
-browse — Browse public MCPs on π.
-  limit, offset: pagination
-
-connect — Connect to a public MCP and load their tools.
-  name: public MCP name from the registry
-  url: direct MCP URL (for unlisted MCPs)
-
-call — Call a tool on the connected MCP.
-  tool: tool name
-  args: tool arguments
-
-edit — Update your π identity.
-  nick_agent, nick_operator: rename
-  gateway_mcp: update your gateway MCP address in PIR
-  home_mcp: set your home MCP URL — connected automatically on next boot
-
-help — This reference.
-
----
+───────────────────────────────────────────────────────
 π never resolves — it grows.`,
     }],
   };
@@ -629,15 +655,14 @@ app.post(`${PREFIX}/mcp`, async (c) => {
         capabilities: { tools: { listChanged: true } },
         serverInfo: { name: "pi-gateway", version: GATEWAY_VERSION },
         nextStep: piPrivate
-          ? "Call boot to connect and load your identity."
-          : "Add X-Pi-Private to your MCP config, then call boot.",
+          ? "Call boot to connect."
+          : "Add X-Pi-Private to your MCP config, then call boot. New? Call install first.",
       },
     });
   }
 
   if (method === "tools/list") {
     let tools = [...BASE_TOOLS];
-    // Append connected MCP tools if a session exists
     if (piPrivate && PRIVATE_PI_RE.test(piPrivate)) {
       const publicPi = toPublicPi(piPrivate);
       const { data: session } = await db().from("mcp_sessions")
@@ -657,18 +682,21 @@ app.post(`${PREFIX}/mcp`, async (c) => {
     const toolName = params?.name as string;
     const args = (params?.arguments ?? {}) as Record<string, any>;
 
+    // Public tools — no auth required
+    if (toolName === "help")    return c.json({ jsonrpc: "2.0", id, result: toolHelp() });
+    if (toolName === "find")    return c.json({ jsonrpc: "2.0", id, result: await toolFind(args) });
+    if (toolName === "browse")  return c.json({ jsonrpc: "2.0", id, result: await toolBrowse(args) });
+    if (toolName === "install") return c.json({ jsonrpc: "2.0", id, result: await toolInstall(args) });
+
+    // boot handles unregistered gracefully
     if (toolName === "boot") {
       if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
         return c.json({
           jsonrpc: "2.0", id,
-          result: fail("X-Pi-Private header required. Add your π private key to your MCP config headers."),
+          result: fail("X-Pi-Private header required. Add your π private key to your MCP config. New? Call install first."),
         });
       }
       return c.json({ jsonrpc: "2.0", id, result: await toolBoot(piPrivate, args) });
-    }
-
-    if (toolName === "help") {
-      return c.json({ jsonrpc: "2.0", id, result: toolHelp() });
     }
 
     if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
@@ -680,15 +708,24 @@ app.post(`${PREFIX}/mcp`, async (c) => {
     try {
       let result;
       switch (toolName) {
-        case "send":    result = await toolSend(piPrivate, publicPi, args);        break;
-        case "receive": result = await toolReceive(publicPi);                       break;
-        case "find":    result = await toolFind(args);                              break;
-        case "browse":  result = await toolRegistry(args);                          break;
-        case "connect": result = await toolConnect(piPrivate, publicPi, args);     break;
-        case "call":    result = await toolCall(piPrivate, publicPi, args);         break;
-        case "edit":    result = await toolUpdate(piPrivate, publicPi, args);        break;
+        case "send":    result = await toolSend(piPrivate, publicPi, args);    break;
+        case "receive": result = await toolReceive(publicPi);                   break;
+        case "find":    result = await toolFind(args);                          break;
+        case "browse":  result = await toolBrowse(args);                        break;
+        case "mount":   result = await toolMount(piPrivate, publicPi, args);   break;
+        case "call":    result = await toolCall(piPrivate, publicPi, args);     break;
+        case "edit":    result = await toolEdit(piPrivate, publicPi, args);     break;
+        // Extended — stubs pending DB migration
+        case "log":
+        case "set":
+        case "file":
+        case "plan":
+        case "sub":
+        case "chat":
+          result = stub(toolName);
+          break;
         default:
-          // Proxy unknown tool names to connected MCP
+          // Proxy unknown tool names to mounted MCP
           result = await toolCall(piPrivate, publicPi, { tool: toolName, args });
       }
       return c.json({ jsonrpc: "2.0", id, result });
