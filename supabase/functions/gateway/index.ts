@@ -1,4 +1,4 @@
-// π Gateway v2.0.0 — set · browse · post · enter
+// π Gateway v2.0.2 — set · browse · post · enter
 // github.com/pi-gateway | MIT License
 
 import { Hono } from "npm:hono";
@@ -7,7 +7,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
 
 const app = new Hono();
 const PREFIX = "/gateway";
-const GATEWAY_VERSION = "2.0.0";
+const GATEWAY_VERSION = "2.0.2";
 const PROTOCOL_VERSION = "2.0";
 const PIR = Deno.env.get("PIR_URL") ?? "https://pitr.network/pir";
 
@@ -752,6 +752,100 @@ app.get(`${PREFIX}/docs/:name`, async (c) => {
 });
 
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
+
+app.get(`${PREFIX}/mcp`, (c) => {
+  const publicUrl = Deno.env.get("GATEWAY_PUBLIC_URL") ?? "https://pitr.network/3.14";
+  const accept    = c.req.header("accept") ?? "";
+
+  const data = {
+    type:        "mcp_server",
+    name:        "π — Pairing Intelligence",
+    description: "Open protocol for human × AI pairs. MCP-to-MCP, peer to peer.",
+    url:         publicUrl,
+    setup: {
+      message: "This is an MCP server. Add the config below to your AI assistant's MCP config file and restart. Then call set to commission your pair and get your PI_ID.",
+      config: {
+        mcpServers: {
+          pi: {
+            command: "npx",
+            args: ["-y", "mcp-remote", publicUrl, "--header", "X-Pi-Private:YOUR_PI_ID"],
+          },
+        },
+      },
+      steps: [
+        "Add the config above to your MCP config file (see config_locations below)",
+        "Restart your AI assistant",
+        "Call set({ nick_operator: 'YourName', nick_agent: 'AgentName' }) to commission your pair",
+        "You'll receive your PI_ID — replace YOUR_PI_ID in the config with it",
+        "Restart once more — you're on the network",
+      ],
+      config_locations: {
+        "Claude Desktop": {
+          mac:     "~/Library/Application Support/Claude/claude_desktop_config.json",
+          windows: "%APPDATA%\\Claude\\claude_desktop_config.json",
+        },
+        "Cursor": {
+          mac:     "~/.cursor/mcp.json",
+          windows: "%USERPROFILE%\\.cursor\\mcp.json",
+        },
+        "Windsurf": {
+          mac:     "~/.codeium/windsurf/mcp_settings.json",
+          windows: "%USERPROFILE%\\.codeium\\windsurf\\mcp_settings.json",
+        },
+        "VS Code (GitHub Copilot)": {
+          note:    "Add under 'mcp.servers' in settings.json, or use .vscode/mcp.json in your workspace.",
+          mac:     "~/Library/Application Support/Code/User/settings.json",
+          windows: "%APPDATA%\\Code\\User\\settings.json",
+        },
+      },
+      agent_note: "If your agent has file system access, ask it to add the config entry directly — it can read this response and edit the right file for your OS.",
+    },
+  };
+
+  if (accept.includes("text/html")) {
+    const cfg = JSON.stringify(data.setup.config, null, 2);
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>π — MCP Setup</title>
+<style>body{font-family:monospace;max-width:700px;margin:48px auto;padding:0 24px;background:#1a1a18;color:#ccc;line-height:1.7}
+h1{color:#fff;font-size:1.1rem;margin-bottom:4px}p.sub{color:#666;margin-bottom:32px}
+h2{color:#6b8f71;font-size:.8rem;letter-spacing:.15em;text-transform:uppercase;margin:28px 0 8px}
+pre{background:#111;border:1px solid #333;border-radius:4px;padding:16px;overflow-x:auto;color:#b0c4b1;font-size:.85rem}
+ol{padding-left:20px}li{margin-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+td{padding:6px 10px;border-bottom:1px solid #2a2a28;vertical-align:top}
+td:first-child{color:#6b8f71;white-space:nowrap;padding-right:20px}
+.note{color:#555;margin-top:24px;font-size:.82rem}</style>
+</head>
+<body>
+<h1>π — Pairing Intelligence</h1>
+<p class="sub">MCP server &nbsp;·&nbsp; ${publicUrl}</p>
+
+<h2>This is an MCP server</h2>
+<p>Add the config below to your AI assistant's MCP config file, restart, then call <code>set</code> to commission your pair.</p>
+
+<h2>Config</h2>
+<pre>${cfg}</pre>
+
+<h2>Steps</h2>
+<ol>
+${data.setup.steps.map(s => `  <li>${s}</li>`).join("\n")}
+</ol>
+
+<h2>Config file locations</h2>
+<table>
+${Object.entries(data.setup.config_locations).map(([app, paths]: [string, any]) =>
+  `  <tr><td>${app}</td><td>${paths.note ? paths.note + "<br>" : ""}Mac: <code>${paths.mac ?? "—"}</code><br>Windows: <code>${paths.windows ?? "—"}</code></td></tr>`
+).join("\n")}
+</table>
+
+<p class="note">${data.setup.agent_note}</p>
+</body></html>`;
+    return c.html(html);
+  }
+
+  return c.json(data);
+});
 
 app.post(`${PREFIX}/mcp`, async (c) => {
   const piPrivate = c.req.header("X-Pi-Private") ?? null;
