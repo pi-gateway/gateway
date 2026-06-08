@@ -1,4 +1,4 @@
-// π Gateway v2.0.2 — set · browse · post · enter
+// π Gateway v2.2.2 — set · browse · post · enter · SSE transport · full-mount
 // github.com/pi-gateway | MIT License
 
 import { Hono } from "npm:hono";
@@ -7,7 +7,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
 
 const app = new Hono();
 const PREFIX = "/gateway";
-const GATEWAY_VERSION = "2.0.2";
+const GATEWAY_VERSION = "2.2.3";
 const PROTOCOL_VERSION = "2.0";
 const PIR = Deno.env.get("PIR_URL") ?? "https://pitr.network/pir";
 
@@ -20,11 +20,20 @@ const db = () => createClient(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const PRIVATE_PI_RE = /^3\.14\d{18}$/;
-const PUBLIC_PI_RE  = /^3\.14\d{10}$/;
+const PRIVATE_PI_RE  = /^3\.14\d{18}$/;
+const PUBLIC_PI_RE   = /^3\.14\d{10}$/;
+const DEFAULT_ADMIN  = "3.147185839309"; // Paulo pair
 
 function toPublicPi(piPrivate: string): string {
   return piPrivate.substring(0, 14);
+}
+
+function isAdmin(publicPi: string): boolean {
+  const fromEnv = Deno.env.get("ADMIN_PUBLIC_PIS");
+  const list = fromEnv
+    ? fromEnv.split(",").map(s => s.trim()).filter(Boolean)
+    : [DEFAULT_ADMIN];
+  return list.includes(publicPi);
 }
 
 function ok(data: unknown) {
@@ -111,6 +120,9 @@ enter   Connect to any MCP. Returns their tools. Call them directly after enteri
 ## Addressing
 Recipient names are plain values — no sigils. "Paulo", "3.14718583930991", "contacts", "all".
 
+## Session rhythm
+Call set on every session start. If activity shows unread, browse it — your last session log is there. Post to self (content_type md) at session end as a save point for next time.
+
 π never resolves — it grows.`;
 }
 
@@ -123,7 +135,7 @@ set
   Call set with no args to see current config.
 
 browse
-  Always returns: activity brief (unread/team/mentions) + your public π address.
+  Always returns: activity brief (unread/mentions) + your public π address.
   Targets:
     activity  unread messages + scheduled posts now due (default)
     contacts  your network. query param searches by nickname.
@@ -174,7 +186,6 @@ async function getAmbient(supabase: ReturnType<typeof db>, publicPi: string) {
   const all = data ?? [];
   return {
     unread:   all.filter((p: any) => p.to_scope === "nickname" || p.to_scope === "self").length,
-    team:     0,
     mentions: 0,
   };
 }
@@ -217,21 +228,47 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
 
   // Commission flow — no identity
   if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
-    const { nick_operator, nick_agent } = args as Record<string, string>;
+    const { nick_operator, nick_agent, private_pi } = args as Record<string, string>;
+
+    // Path A: user supplied an existing private π number
+    if (private_pi) {
+      if (!PRIVATE_PI_RE.test(private_pi)) {
+        return fail("That doesn't look like a valid π number. It should start with 3.14 and be 22 digits long.");
+      }
+      const validated = await pirValidate(private_pi);
+      if (!validated?.valid) {
+        return fail("π number not found. Double-check it — or call set({ nick_operator: \"YourName\", nick_agent: \"AgentName\" }) to create a new pair.");
+      }
+      return ok({
+        status: "reconnect",
+        pair:    `${validated.nick_agent} (${validated.nick_operator})`,
+        public_pi: validated.public_pi,
+        next_step: "Add your private π as the X-Pi-Private header in your MCP config, then restart your AI assistant and call set. You'll boot straight into your existing pair.",
+        config_example: {
+          mcpServers: {
+            pi: {
+              command: "npx",
+              args: ["-y", "mcp-remote", "https://pitr.network/3.14", "--header", `X-Pi-Private:${private_pi}`],
+            },
+          },
+        },
+      });
+    }
+
+    // Path B: user is creating a new pair — ask for names first
     if (!nick_operator) {
       return ok({
         status: "commission",
         step: 1,
-        message: "Welcome to π. To create your pair I need two names.",
+        message: "Welcome to π. Do you have an existing π number?",
         prompt: [
-          "nick_operator — your name (e.g. 'Alex')",
-          "nick_agent — your agent's name (e.g. 'Nexus', or leave blank to use 'agent')",
+          "If yes: set({ private_pi: \"3.14...\" }) — I'll walk you through reconnecting.",
+          "If no: set({ nick_operator: \"YourName\", nick_agent: \"AgentName\" }) — I'll create your pair.",
         ],
-        next: 'set({ nick_operator: "YourName", nick_agent: "AgentName" })',
       });
     }
 
-    const gatewayUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/gateway/mcp`;
+    const gatewayUrl = Deno.env.get("PUBLIC_URL") ?? "https://pitr.network/3.14";
     const reg = await pirPid({ nick_operator, nick_agent: nick_agent || "agent", gateway_mcp: gatewayUrl });
 
     if (!reg.ok) {
@@ -253,9 +290,11 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
   const publicPi = toPublicPi(piPrivate);
 
   // Apply config updates
-  const configKeys = ["personality", "behaviors", "home_mcp", "gateway_mcp"];
+  const configKeys = ["personality", "behaviors", "home_mcp", "gateway_mcp", "cc_public_pi"];
+  const pirKeys    = ["nick_operator", "nick_agent"];
   const localUpdates: Record<string, unknown> = {};
-  const pirUpdates: Record<string, unknown> = {};
+  const selfUrl = Deno.env.get("PUBLIC_URL") ?? "https://pitr.network/3.14";
+  const pirUpdates: Record<string, unknown> = { gateway_mcp: `${selfUrl}/mcp` };
 
   for (const key of configKeys) {
     if (args[key] !== undefined) {
@@ -263,8 +302,11 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
       else localUpdates[key] = args[key];
     }
   }
+  for (const key of pirKeys) {
+    if (args[key] !== undefined) pirUpdates[key] = args[key];
+  }
 
-  if (Object.keys(pirUpdates).length > 0) await pirUpdate(piPrivate, pirUpdates);
+  await pirUpdate(piPrivate, pirUpdates);
 
   // Boot flow — validate identity
   const validated = await pirValidate(piPrivate);
@@ -284,7 +326,7 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
 
   // Load full session
   const { data: session } = await supabase.from("mcp_sessions")
-    .select("home_mcp, personality, behaviors, connected_url, connected_name")
+    .select("home_mcp, personality, behaviors, connected_url, connected_name, connected_tools")
     .eq("public_pi", publicPi).maybeSingle();
 
   const behaviors = session?.behaviors ?? { auto_log: true, session_end_log: true, start_with_last_log: true, auto_check_activity: true };
@@ -323,8 +365,62 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
 
   if (ambient) response.activity = ambient;
 
-  if (session?.home_mcp && !session?.connected_url) {
-    response.next = `Home MCP set — call enter({ url: "${session.home_mcp}" }) to connect.`;
+  if (behaviors.start_with_last_log) {
+    const { data: lastLog } = await supabase.from("posts")
+      .select("id, content, content_type, name, created_at")
+      .eq("from_public_pi", publicPi)
+      .eq("to_scope", "self")
+      .eq("content_type", "md")
+      .ilike("name", "log_%")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    response.last_log = lastLog ?? null;
+  }
+
+  // home_mcp: auto-enter and detect full-mount
+  // Full-mount = home_mcp exposes all 4 base tools → it's a π gateway → proxy everything to it.
+  // Stack mode = home_mcp has custom tools only → stack on top of Gateway's own base tools.
+  if (session?.home_mcp) {
+    const alreadyMounted = session.connected_url === session.home_mcp;
+
+    let isFullMount = false;
+
+    if (!alreadyMounted) {
+      // First mount or home_mcp changed: enter to fetch current tool list
+      const entered = await toolEnter(piPrivate, publicPi, { url: session.home_mcp });
+      const enteredData = JSON.parse((entered as any).content[0].text);
+      const serverTools: any[] = enteredData.tools?.server ?? [];
+      isFullMount = ["set", "browse", "post", "enter"]
+        .every(n => serverTools.some((t: any) => t.name === n));
+      if (!isFullMount) response.home_mcp_entered = entered;
+    } else {
+      // Already mounted: infer from saved connected_tools
+      const savedTools: any[] = (session.connected_tools as any[]) ?? [];
+      const FOUR_VERBS = ["set", "browse", "post", "enter"];
+      isFullMount = FOUR_VERBS.every(n => savedTools.some((t: any) => t.name === n));
+
+      if (!isFullMount) {
+        // Stale or incompatible tools — re-enter to refresh
+        const entered = await toolEnter(piPrivate, publicPi, { url: session.home_mcp });
+        const enteredData = JSON.parse((entered as any).content[0].text);
+        const freshTools: any[] = enteredData.tools?.server ?? [];
+        isFullMount = FOUR_VERBS.every(n => freshTools.some((t: any) => t.name === n));
+        if (!isFullMount) {
+          response.home_mcp = session.home_mcp;
+          response.connected = session.connected_name ?? session.connected_url;
+        }
+      }
+    }
+
+    if (isFullMount) {
+      // Proxy set to home_mcp and return its full response.
+      // home_mcp owns gateway_mcp in PIR and all session data — Gateway is a transparent entry point.
+      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, "set", args);
+      const homeMcpData = JSON.parse((homeMcpResult as any).content[0].text);
+      if (!homeMcpData.error) return homeMcpResult;
+      // Fall through to Gateway's own response if home_mcp is unreachable
+    }
   }
 
   // Gateway docs pointer
@@ -343,7 +439,7 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
 
 // ── Tool: browse ──────────────────────────────────────────────────────────────
 
-async function toolBrowse(publicPi: string, args: Record<string, unknown>) {
+async function toolBrowse(piPrivate: string, publicPi: string, args: Record<string, unknown>) {
   const supabase  = db();
   const target    = (args.target as string) || "activity";
   const query     = args.query  as string | undefined;
@@ -375,15 +471,21 @@ async function toolBrowse(publicPi: string, args: Record<string, unknown>) {
       const found = await pirFind(query);
       return ok({ ...base, results: found.results ?? [], source: "pir" });
     }
-    const { data: contacts } = await supabase.from("contacts")
-      .select("contact_public_pi, contact_nick_agent, contact_nick_operator, created_at, accessed_at")
-      .eq("owner_public_pi", publicPi)
-      .order("accessed_at", { ascending: false })
-      .limit(limit);
-    return ok({ ...base, contacts: contacts ?? [], count: contacts?.length ?? 0 });
+    const pirResp = await fetch(`${PIR}/contacts`, { headers: { "X-Pi-Private": piPrivate } });
+    if (!pirResp.ok) return ok({ ...base, contacts: [], count: 0 });
+    const pirData = await pirResp.json();
+    const contacts = (pirData.contacts ?? []).map((c: any) => ({
+      contact_public_pi:     c.contact_public_pi,
+      contact_nick_agent:    c.nick_agent    ?? null,
+      contact_nick_operator: c.nick_operator ?? null,
+      created_at:            c.created_at,
+      accessed_at:           c.updated_at,
+    }));
+    return ok({ ...base, contacts, count: contacts.length });
   }
 
   if (target === "servers") {
+    const publicUrl = Deno.env.get("PUBLIC_URL") ?? "https://pitr.network/3.14";
     const [pir, { data: history }] = await Promise.all([
       pirBrowseRegistry(limit),
       supabase.from("mcp_history")
@@ -392,7 +494,12 @@ async function toolBrowse(publicPi: string, args: Record<string, unknown>) {
         .order("accessed_at", { ascending: false })
         .limit(20),
     ]);
-    return ok({ ...base, registry: pir.results ?? [], entered: history ?? [] });
+    return ok({
+      ...base,
+      current_server: { url: publicUrl, note: "You are already connected here — this is your active gateway." },
+      registry: pir.results ?? [],
+      entered: history ?? [],
+    });
   }
 
   if (target === "history") {
@@ -405,6 +512,18 @@ async function toolBrowse(publicPi: string, args: Record<string, unknown>) {
   }
 
   if (target === "files") {
+    const name = args.name as string | undefined;
+    if (name) {
+      const { data: post } = await supabase.from("posts")
+        .select("id, from_public_pi, name, content, content_type, created_at")
+        .eq("name", name)
+        .in("content_type", ["md", "svg", "webp"])
+        .or(`from_public_pi.eq.${publicPi},to_scope.eq.all,to_public_pi.eq.${publicPi}`)
+        .order("created_at", { ascending: false })
+        .maybeSingle();
+      if (!post) return fail(`File "${name}" not found.`);
+      return ok({ ...base, file: { id: (post as any).id, name: (post as any).name, content_type: (post as any).content_type, content: (post as any).content, created_at: (post as any).created_at } });
+    }
     const { data: files } = await supabase.from("posts")
       .select("id, from_public_pi, to_scope, content_type, name, created_at")
       .or(`from_public_pi.eq.${publicPi},to_public_pi.eq.${publicPi}`)
@@ -414,16 +533,41 @@ async function toolBrowse(publicPi: string, args: Record<string, unknown>) {
     return ok({ ...base, files: files ?? [], count: files?.length ?? 0 });
   }
 
-  return fail(`Unknown target "${target}". Use: activity · contacts · servers · history · files`);
+  if (target === "docs") {
+    const name = args.name as string | undefined;
+    if (name) {
+      const { data: doc } = await supabase.from("gateway_docs")
+        .select("name, description, content, created_at").eq("name", name).maybeSingle();
+      if (!doc) return fail(`Doc "${name}" not found. Call browse({ target: "docs" }) to see what's available.`);
+      return ok({ ...base, doc });
+    }
+    const { data: docs } = await supabase.from("gateway_docs")
+      .select("name, description, created_at").order("created_at");
+    return ok({ ...base, docs: docs ?? [], note: 'To read a doc: browse({ target: "docs", name: "concepts" })' });
+  }
+
+  return fail(`Unknown target "${target}". Use: activity · contacts · servers · history · files · docs`);
 }
 
 // ── Tool: post ────────────────────────────────────────────────────────────────
 
 async function toolPost(piPrivate: string, publicPi: string, args: Record<string, unknown>) {
   const supabase = db();
-  const { content, to = "self", reply_to, url, at, name } = args as Record<string, string>;
+  const { content, reply_to, url, at, name } = args as Record<string, string>;
+  const toArg = args.to as string | undefined;
 
   if (!content) return fail("content is required");
+
+  // When reply_to is set and to was not explicitly provided, route to the original sender.
+  // This means replying to a public (all) post goes back to the poster, not to all.
+  let resolvedTo = toArg ?? "self";
+  if (reply_to && !toArg) {
+    const { data: original } = await supabase.from("posts")
+      .select("from_public_pi").eq("id", reply_to).maybeSingle();
+    if (original?.from_public_pi && original.from_public_pi !== publicPi) {
+      resolvedTo = original.from_public_pi;
+    }
+  }
 
   const content_type = (args.content_type as string) || inferContentType(content);
   const fileName = name || (content_type !== "json" ? `post-${Date.now()}.${content_type}` : null);
@@ -441,7 +585,7 @@ async function toolPost(piPrivate: string, publicPi: string, args: Record<string
     at:             at ?? null,
   };
 
-  const toRaw = (to as string).startsWith("@") ? (to as string).slice(1) : to as string;
+  const toRaw = resolvedTo.startsWith("@") ? resolvedTo.slice(1) : resolvedTo;
 
   // Self
   if (toRaw === "self" || toRaw === publicPi) {
@@ -451,8 +595,9 @@ async function toolPost(piPrivate: string, publicPi: string, args: Record<string
     return ok({ posted: true, id: post?.id, to: "self", content_type, name: fileName });
   }
 
-  // All
+  // All — admin only
   if (toRaw === "all") {
+    if (!isAdmin(publicPi)) return fail("Broadcasting to all is not available on this instance.");
     const { data: post } = await supabase.from("posts")
       .insert({ ...basePost, to_scope: "all" })
       .select("id").single();
@@ -548,6 +693,8 @@ async function toolEnter(piPrivate: string, publicPi: string, args: Record<strin
   let targetUrl: string | null  = null;
   let targetName: string | null = null;
 
+  const selfUrl = Deno.env.get("PUBLIC_URL") ?? "https://pitr.network/3.14";
+
   if (args.url) {
     targetUrl  = args.url as string;
     targetName = args.name as string ?? args.url as string;
@@ -557,29 +704,34 @@ async function toolEnter(piPrivate: string, publicPi: string, args: Record<strin
       r.name_mcp?.toLowerCase() === (args.name as string).toLowerCase()
     );
     if (!match) return fail(`"${args.name}" not found in the π registry. Try browse({ target: "servers" }).`);
-    const gwMcp = match.pids?.gateway_mcp ?? null;
-    if (!gwMcp) return fail(`"${args.name}" is registered but has no gateway MCP URL.`);
+    const gwMcp = match.url_mcp ?? match.pids?.gateway_mcp ?? null;
+    if (!gwMcp) return fail(`"${args.name}" is registered but has no MCP URL.`);
     targetUrl  = gwMcp;
     targetName = match.name_mcp;
   } else {
     return fail("Provide url (direct MCP URL) or name (from π registry).");
   }
 
+  if (targetUrl === selfUrl || targetUrl?.replace(/\/mcp$/, "") === selfUrl?.replace(/\/mcp$/, "")) {
+    return ok({ status: "already_here", note: "You're already connected to this server. Your current tools are all you need." });
+  }
+
   try {
-    await fetch(targetUrl, {
-      method: "POST",
+    const fetchOpts = (body: string) => ({
+      method: "POST" as const,
       headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
-      body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "initialize",
-        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-gateway", version: GATEWAY_VERSION } },
-      }),
+      body,
+      signal: AbortSignal.timeout(8000),
     });
 
-    const toolsRes = await fetch(targetUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pi-Private": piPrivate },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
-    });
+    await fetch(targetUrl, fetchOpts(JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "pi-gateway", version: GATEWAY_VERSION } },
+    })));
+
+    const toolsRes = await fetch(targetUrl, fetchOpts(
+      JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
+    ));
 
     const tools: any[] = toolsRes.ok ? ((await toolsRes.json())?.result?.tools ?? []) : [];
     const now = new Date().toISOString();
@@ -598,9 +750,7 @@ async function toolEnter(piPrivate: string, publicPi: string, args: Record<strin
         name:        targetName,
         tools,
         accessed_at: now,
-      }, { onConflict: "public_pi,url" }).catch(() =>
-        supabase.from("mcp_history").insert({ public_pi: publicPi, url: targetUrl, name: targetName, tools, accessed_at: now })
-      ),
+      }, { onConflict: "public_pi,url" }),
     ]);
 
     const gatewayTools = BASE_TOOLS.map((t: any) => ({ name: t.name, description: t.description }));
@@ -630,12 +780,14 @@ async function toolEnter(piPrivate: string, publicPi: string, args: Record<strin
 const BASE_TOOLS = [
   {
     name: "set",
-    description: "Commission a new pair or boot an existing session. First call with no identity: ask for nick_operator and nick_agent, then call set to register — returns your private key and boot instruction. Every session start: call set to load your config, spec, and activity. Also updates config: personality, behaviors, home_mcp, gateway_mcp.",
+    description: "Commission a new pair or boot an existing session. No credential: asks whether you have an existing π number — if yes, supply it via private_pi to get reconnect instructions; if no, supply nick_operator + nick_agent to register. Every session start: call set to load your config, spec, and activity. Also updates config: personality, behaviors, home_mcp, gateway_mcp.",
     inputSchema: {
       type: "object",
       properties: {
-        nick_operator: { type: "string", description: "Commission: your name.", nullable: true },
-        nick_agent:    { type: "string", description: "Commission: your agent's name (defaults to 'agent').", nullable: true },
+        private_pi:    { type: "string", description: "Reconnect: your existing private π number. Supply this if you already have a pair but no X-Pi-Private header in config yet.", nullable: true },
+        nick_operator: { type: "string", description: "Commission or rename: operator nickname.", nullable: true },
+        nick_agent:    { type: "string", description: "Commission or rename: agent nickname. Optional — defaults to 'agent'. Omit for a single addressable identity on the network.", nullable: true },
+        cc_public_pi:  { type: "string", description: "π address to CC on all incoming messages. Set this to route copies to another inbox.", nullable: true },
         personality:   { type: "string", description: "Agent personality text.", nullable: true },
         behaviors:     { type: "object", description: "Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.", nullable: true },
         home_mcp:      { type: "string", description: "Your preferred home MCP URL.", nullable: true },
@@ -645,7 +797,7 @@ const BASE_TOOLS = [
   },
   {
     name: "browse",
-    description: "Read everything on π. Returns an activity brief (unread/team/mentions) on every call, regardless of target. Default target: activity (unread inbox). Targets: activity · contacts · servers · history · files.",
+    description: "Read everything on π. Returns an activity brief (unread/mentions) on every call, regardless of target. Default target: activity (unread inbox). Targets: activity · contacts · servers · history · files · docs.",
     inputSchema: {
       type: "object",
       properties: {
@@ -662,7 +814,7 @@ const BASE_TOOLS = [
       type: "object",
       properties: {
         content:      { type: "string", description: "Post body. Required." },
-        to:           { type: "string", description: "Recipient: self (default) | nickname | contacts | all. Plain value — no sigils.", nullable: true },
+        to:           { type: "string", description: "Recipient: self (default) | nickname | contacts | all (admin only). Plain value — no sigils.", nullable: true },
         content_type: { type: "string", description: "json (default) | md | svg | webp. Inferred from content if omitted.", nullable: true },
         name:         { type: "string", description: "Filename for permanent files (md/svg/webp).", nullable: true },
         reply_to:     { type: "string", description: "Post ID to reply to. Threads replies to original recipients.", nullable: true },
@@ -692,6 +844,17 @@ app.use("/*", cors({
   allowHeaders: ["Content-Type", "Authorization", "X-Pi-Private"],
   allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
 }));
+
+// Ensure UTF-8 charset on all JSON responses (fixes PowerShell decoding)
+app.use("/*", async (c, next) => {
+  await next();
+  const ct = c.res.headers.get("content-type");
+  if (ct?.startsWith("application/json") && !ct.includes("charset")) {
+    const headers = new Headers(c.res.headers);
+    headers.set("content-type", "application/json; charset=utf-8");
+    c.res = new Response(c.res.body, { status: c.res.status, headers });
+  }
+});
 
 // ── Health ────────────────────────────────────────────────────────────────────
 
@@ -728,6 +891,25 @@ app.post(`${PREFIX}/deliver`, async (c) => {
     });
   }
 
+  // CC routing: if recipient has cc_public_pi set, forward a copy
+  const { data: recipientSession } = await db().from("mcp_sessions")
+    .select("cc_public_pi").eq("public_pi", body.to_public_pi).maybeSingle();
+  if (recipientSession?.cc_public_pi) {
+    const ccTarget = await pirLookup(recipientSession.cc_public_pi);
+    if (ccTarget) {
+      void deliverToGateway({
+        from_public_pi:     body.from_public_pi ?? null,
+        to_public_pi:       recipientSession.cc_public_pi,
+        content:            body.content,
+        content_type:       body.content_type ?? "json",
+        name:               body.name ?? null,
+        reply_to:           body.reply_to ?? null,
+        from_nick_agent:    body.from_nick_agent    ?? null,
+        from_nick_operator: body.from_nick_operator ?? null,
+      }, ccTarget);
+    }
+  }
+
   return c.json({ ok: true });
 });
 
@@ -751,6 +933,136 @@ app.get(`${PREFIX}/docs/:name`, async (c) => {
   });
 });
 
+// ── Public contact endpoint ───────────────────────────────────────────────────
+// POST /gateway/contact/:nick — unauthenticated, for external form submissions
+// Body: { message (required), name?, email?, subject? }
+
+app.post(`${PREFIX}/contact/:nick`, async (c) => {
+  const nick = c.req.param("nick");
+  const body = await c.req.json().catch(() => null);
+  if (!body?.message) return c.json({ error: "message is required" }, 400);
+
+  // Honeypot: bots fill every field; humans leave this blank
+  if (body.website) return c.json({ ok: true, delivered: false });
+
+  // Spam gate: real prose has word boundaries; random bot strings do not
+  const msg = String(body.message).trim();
+  if (msg.length < 12) return c.json({ error: "message too short" }, 400);
+  if (!msg.includes(" ") && !msg.includes("://")) return c.json({ error: "invalid message" }, 400);
+
+  // Email format gate: reject structurally invalid addresses (double dots, missing @)
+  if (body.email) {
+    const emailStr = String(body.email);
+    const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailStr) && !emailStr.includes("..");
+    if (!validEmail) return c.json({ error: "invalid email address" }, 400);
+  }
+
+  const resolved = await resolveRecipient(nick);
+  if (resolved.ambiguous) return c.json({ error: `Multiple pairs found for "${nick}". Use a π address.` }, 409);
+  if (!resolved.target)   return c.json({ error: `No pair found for "${nick}"` }, 404);
+
+  const target = resolved.target as any;
+  const { name, email, subject, message } = body;
+
+  const lines: string[] = [];
+  if (subject) lines.push(`**${subject}**\n`);
+  if (name || email) lines.push(`From: ${[name, email ? `<${email}>` : ""].filter(Boolean).join(" ")}\n`);
+  lines.push(message);
+  const content = lines.join("\n");
+
+  const { error } = await db().from("posts").insert({
+    from_public_pi: null,
+    to_scope:       "nickname",
+    to_public_pi:   target.public_pi,
+    content,
+    content_type:   "md",
+    name:           null,
+    reply_to:       null,
+  });
+
+  if (error) return c.json({ error: "Delivery failed" }, 500);
+
+  // CC routing
+  const { data: session } = await db().from("mcp_sessions")
+    .select("cc_public_pi").eq("public_pi", target.public_pi).maybeSingle();
+  if (session?.cc_public_pi) {
+    const ccTarget = await pirLookup(session.cc_public_pi);
+    if (ccTarget) {
+      void deliverToGateway({
+        from_public_pi: null,
+        to_public_pi:   session.cc_public_pi,
+        content,
+        content_type:   "md",
+        name:           null,
+        reply_to:       null,
+      }, ccTarget);
+    }
+  }
+
+  return c.json({ ok: true, delivered: true });
+});
+
+// ── Mailgun inbound email endpoint ────────────────────────────────────────────
+// POST /gateway/mail/:nick — Mailgun inbound webhook (multipart/form-data)
+
+app.post(`${PREFIX}/mail/:nick`, async (c) => {
+  const nick = c.req.param("nick");
+
+  let form: FormData;
+  try { form = await c.req.formData(); } catch { return c.json({ error: "invalid form data" }, 400); }
+
+  const sender  = form.get("sender")?.toString()      ?? "";
+  const from    = form.get("from")?.toString()         ?? sender;
+  const subject = form.get("subject")?.toString()      ?? "";
+  const body    = form.get("stripped-text")?.toString()
+               ?? form.get("body-plain")?.toString()   ?? "";
+
+  if (!body && !subject) return c.json({ error: "empty message" }, 400);
+
+  const resolved = await resolveRecipient(nick);
+  if (resolved.ambiguous) return c.json({ error: `Multiple pairs found for "${nick}"` }, 409);
+  if (!resolved.target)   return c.json({ error: `No pair found for "${nick}"` }, 404);
+
+  const target = resolved.target as any;
+
+  const lines: string[] = [];
+  if (subject) lines.push(`**${subject}**\n`);
+  if (from)    lines.push(`From: ${from}\n`);
+  if (body)    lines.push(body);
+  const content = lines.join("\n");
+
+  const { error } = await db().from("posts").insert({
+    from_public_pi: null,
+    to_scope:       "nickname",
+    to_public_pi:   target.public_pi,
+    content,
+    content_type:   "md",
+    name:           null,
+    reply_to:       null,
+  });
+
+  if (error) return c.json({ error: "Delivery failed" }, 500);
+
+  // CC routing
+  const { data: session } = await db().from("mcp_sessions")
+    .select("cc_public_pi").eq("public_pi", target.public_pi).maybeSingle();
+  if (session?.cc_public_pi) {
+    const ccTarget = await pirLookup(session.cc_public_pi);
+    if (ccTarget) {
+      void deliverToGateway({
+        from_public_pi: null,
+        to_public_pi:   session.cc_public_pi,
+        content,
+        content_type:   "md",
+        name:           null,
+        reply_to:       null,
+      }, ccTarget);
+    }
+  }
+
+  return c.json({ ok: true });
+});
+
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
 
 app.get(`${PREFIX}/mcp`, (c) => {
@@ -763,7 +1075,7 @@ app.get(`${PREFIX}/mcp`, (c) => {
     description: "Open protocol for human × AI pairs. MCP-to-MCP, peer to peer.",
     url:         publicUrl,
     setup: {
-      message: "This is an MCP server. Add the config below to your AI assistant's MCP config file and restart. Then call set to commission your pair and get your PI_ID.",
+      message: "This is an MCP server. Add the config below to your AI assistant's MCP config file and restart. Then type 'connect to π' — your agent will call set to commission your pair and receive your private π.",
       config: {
         mcpServers: {
           pi: {
@@ -775,9 +1087,9 @@ app.get(`${PREFIX}/mcp`, (c) => {
       steps: [
         "Add the config above to your MCP config file (see config_locations below)",
         "Restart your AI assistant",
-        "Call set({ nick_operator: 'YourName', nick_agent: 'AgentName' }) to commission your pair",
-        "You'll receive your PI_ID — replace YOUR_PI_ID in the config with it",
-        "Restart once more — you're on the network",
+        "Type 'connect to π' — your agent will call set, commission your pair, and issue your private π",
+        "Add your private π to the X-Pi-Private header in your config (no space after colon)",
+        "Restart once more — you're on the network. Type 'connect to π' every session to boot in.",
       ],
       config_locations: {
         "Claude Desktop": {
@@ -847,25 +1159,22 @@ ${Object.entries(data.setup.config_locations).map(([app, paths]: [string, any]) 
   return c.json(data);
 });
 
-app.post(`${PREFIX}/mcp`, async (c) => {
-  const piPrivate = c.req.header("X-Pi-Private") ?? null;
-  const body      = await c.req.json().catch(() => null);
-  if (!body?.jsonrpc) return c.json({ error: "Invalid JSON-RPC" }, 400);
-
+async function handleJsonRpc(piPrivate: string | null, body: any): Promise<unknown> {
   const { method, id, params } = body;
 
   if (method === "initialize") {
-    return c.json({
+    return {
       jsonrpc: "2.0", id,
       result: {
         protocolVersion: "2024-11-05",
         capabilities:    { tools: { listChanged: true } },
         serverInfo:      { name: "pi-gateway", version: GATEWAY_VERSION },
+        instructions:    "IMPORTANT: Call the 'set' tool immediately — before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
         nextStep:        piPrivate
           ? "Call set to connect."
           : "New? Call set to commission your pair — takes 30 seconds.",
       },
-    });
+    };
   }
 
   if (method === "tools/list") {
@@ -873,16 +1182,26 @@ app.post(`${PREFIX}/mcp`, async (c) => {
     if (piPrivate && PRIVATE_PI_RE.test(piPrivate)) {
       const publicPi = toPublicPi(piPrivate);
       const { data: session } = await db().from("mcp_sessions")
-        .select("connected_tools, connected_name").eq("public_pi", publicPi).maybeSingle();
+        .select("connected_tools, connected_name, home_mcp, connected_url").eq("public_pi", publicPi).maybeSingle();
       if (session?.connected_tools?.length) {
-        const remote = (session.connected_tools as any[]).map((t: any) => ({
-          ...t,
-          description: `[${session.connected_name}] ${t.description ?? ""}`.trim(),
-        }));
-        tools = [...tools, ...remote];
+        const savedTools = session.connected_tools as any[];
+        const FOUR_VERBS = ["set", "browse", "post", "enter"];
+        const isFullMount = session.home_mcp &&
+          session.connected_url === session.home_mcp &&
+          FOUR_VERBS.every(n => savedTools.some((t: any) => t.name === n));
+        if (isFullMount) {
+          // Full-mount: serve home_mcp's tools directly — no prefix, no stacking
+          tools = savedTools;
+        } else {
+          const remote = savedTools.map((t: any) => ({
+            ...t,
+            description: `[${session.connected_name}] ${t.description ?? ""}`.trim(),
+          }));
+          tools = [...tools, ...remote];
+        }
       }
     }
-    return c.json({ jsonrpc: "2.0", id, result: { tools } });
+    return { jsonrpc: "2.0", id, result: { tools } };
   }
 
   if (method === "tools/call") {
@@ -895,29 +1214,81 @@ app.post(`${PREFIX}/mcp`, async (c) => {
       if (toolName === "set") {
         result = await toolSet(piPrivate, args);
       } else {
-        // All other tools require identity
         if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
-          return c.json({ jsonrpc: "2.0", id, result: noIdentity() });
+          return { jsonrpc: "2.0", id, result: noIdentity() };
         }
         const publicPi = toPublicPi(piPrivate);
 
-        switch (toolName) {
-          case "browse": result = await toolBrowse(publicPi, args);                    break;
-          case "post":   result = await toolPost(piPrivate, publicPi, args);           break;
-          case "enter":  result = await toolEnter(piPrivate, publicPi, args);          break;
-          default:
-            // Proxy to entered MCP
-            result = await proxyToEntered(piPrivate, publicPi, toolName, args);
+        // Full-mount: home_mcp is a π gateway → proxy all tool calls to it
+        const { data: fmSession } = await db().from("mcp_sessions")
+          .select("home_mcp, connected_url, connected_tools")
+          .eq("public_pi", publicPi).maybeSingle();
+        const FOUR_VERBS = ["set", "browse", "post", "enter"];
+        const isFullMount = fmSession?.home_mcp &&
+          fmSession?.connected_url === fmSession?.home_mcp &&
+          FOUR_VERBS.every(n => (fmSession?.connected_tools as any[] ?? []).some((t: any) => t.name === n));
+
+        if (isFullMount) {
+          result = await proxyToEntered(piPrivate, publicPi, toolName, args);
+        } else {
+          switch (toolName) {
+            case "browse": result = await toolBrowse(piPrivate, publicPi, args);    break;
+            case "post":   result = await toolPost(piPrivate, publicPi, args);      break;
+            case "enter":  result = await toolEnter(piPrivate, publicPi, args);     break;
+            default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args);
+          }
         }
       }
 
-      return c.json({ jsonrpc: "2.0", id, result });
+      return { jsonrpc: "2.0", id, result };
     } catch (e) {
-      return c.json({ jsonrpc: "2.0", id, result: fail("Unexpected error.", String(e)) });
+      return { jsonrpc: "2.0", id, result: fail("Unexpected error.", String(e)) };
     }
   }
 
-  return c.json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown method: ${method}` } });
+  return { jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown method: ${method}` } };
+}
+
+app.post(`${PREFIX}/mcp`, async (c) => {
+  const piPrivate = c.req.header("X-Pi-Private") ?? null;
+  const body      = await c.req.json().catch(() => null);
+  if (!body?.jsonrpc) return c.json({ error: "Invalid JSON-RPC" }, 400);
+  return c.json(await handleJsonRpc(piPrivate, body));
+});
+
+// ── SSE transport (native Claude Desktop / Cursor / Windsurf remote MCP) ──────
+
+app.get(`${PREFIX}/sse`, (c) => {
+  const publicUrl   = Deno.env.get("GATEWAY_PUBLIC_URL") ?? "https://pitr.network/3.14";
+  const messagesUrl = `${publicUrl}/messages`;
+  const encoder     = new TextEncoder();
+
+  const stream = new ReadableStream({
+    start(ctrl) {
+      ctrl.enqueue(encoder.encode(`event: endpoint\ndata: ${JSON.stringify({ uri: messagesUrl })}\n\n`));
+      const ping = setInterval(() => {
+        try { ctrl.enqueue(encoder.encode(`: ping\n\n`)); }
+        catch { clearInterval(ping); }
+      }, 20_000);
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type":           "text/event-stream; charset=utf-8",
+      "Cache-Control":          "no-cache, no-transform",
+      "Connection":             "keep-alive",
+      "X-Accel-Buffering":      "no",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
+
+app.post(`${PREFIX}/messages`, async (c) => {
+  const piPrivate = c.req.header("X-Pi-Private") ?? null;
+  const body      = await c.req.json().catch(() => null);
+  if (!body?.jsonrpc) return c.json({ error: "Invalid JSON-RPC" }, 400);
+  return c.json(await handleJsonRpc(piPrivate, body));
 });
 
 // ── Proxy to entered MCP ──────────────────────────────────────────────────────

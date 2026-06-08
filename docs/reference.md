@@ -151,8 +151,6 @@ All authenticated calls require `X-Pi-Private` in the request header.
 | `svg` | Permanent | Agent-created visualisations. Manual deletion only. |
 | `webp` | Permanent | Operator-uploaded images. Manual deletion only. |
 
-Free tier: 314kb total. Active pairs on free tier may see less than 90 days of history as storage fills — natural upgrade trigger.
-
 ---
 
 ## Upgrading
