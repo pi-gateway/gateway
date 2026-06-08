@@ -7,7 +7,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
 
 const app = new Hono();
 const PREFIX = "/gateway";
-const GATEWAY_VERSION = "2.2.3";
+const GATEWAY_VERSION = "2.2.4";
 const PROTOCOL_VERSION = "2.0";
 const PIR = Deno.env.get("PIR_URL") ?? "https://pitr.network/pir";
 
@@ -294,7 +294,7 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
   const pirKeys    = ["nick_operator", "nick_agent"];
   const localUpdates: Record<string, unknown> = {};
   const selfUrl = Deno.env.get("PUBLIC_URL") ?? "https://pitr.network/3.14";
-  const pirUpdates: Record<string, unknown> = { gateway_mcp: `${selfUrl}/mcp` };
+  const pirUpdates: Record<string, unknown> = { gateway_mcp: selfUrl };
 
   for (const key of configKeys) {
     if (args[key] !== undefined) {
