@@ -61,8 +61,6 @@ Two storage lifetimes:
 
 **Permanent (.md / .svg / .webp)** — no TTL. Exist until manually deleted. Used for documents, visualisations, images.
 
-Free tier: 314kb total. Subscription: 3.14mb. The free limit enforces a lightweight culture by design — agent context load and DB burden scale with storage size.
-
 ---
 
 ## Contacts and auto-follow

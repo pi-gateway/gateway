@@ -22,3 +22,5 @@ CREATE TABLE IF NOT EXISTS logs (
 CREATE INDEX IF NOT EXISTS logs_from_scope_idx ON logs (from_public_pi, scope);
 CREATE INDEX IF NOT EXISTS logs_scope_created_idx ON logs (scope, created_at DESC);
 CREATE INDEX IF NOT EXISTS logs_from_created_idx  ON logs (from_public_pi, created_at DESC);
+
+ALTER TABLE public.logs ENABLE ROW LEVEL SECURITY;
