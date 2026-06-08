@@ -602,7 +602,7 @@ async function toolPost(piPrivate: string, publicPi: string, args: Record<string
       .insert({ ...basePost, to_scope: "all" })
       .select("id").single();
 
-    if (url) void fireUrl(url, content, content_type, post?.id);
+    if (url) void fireUrl(url, content, content_type, publicPi, post?.id);
     return ok({ posted: true, id: post?.id, to: "all", content_type, name: fileName });
   }
 
@@ -663,7 +663,7 @@ async function toolPost(piPrivate: string, publicPi: string, args: Record<string
   // Auto-contact
   await upsertContact(supabase, publicPi, { public_pi: target.public_pi, nick_agent: target.nick_agent, nick_operator: target.nick_operator });
 
-  if (url) void fireUrl(url, content, content_type, post?.id);
+  if (url) void fireUrl(url, content, content_type, publicPi, post?.id);
 
   return ok({
     posted:    true,
@@ -676,14 +676,36 @@ async function toolPost(piPrivate: string, publicPi: string, args: Record<string
   });
 }
 
-async function fireUrl(url: string, content: string, content_type: string, postId?: string) {
+async function fireUrl(url: string, content: string, content_type: string, publicPi: string, postId?: string) {
+  let errorMsg: string | null = null;
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": content_type === "json" ? "application/json" : "text/plain" },
       body: content,
     });
-  } catch { /* feedback stored as self-note in a future iteration */ }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      errorMsg = `url fire failed: HTTP ${res.status}${body ? ` — ${body.slice(0, 200)}` : ""}`;
+    }
+  } catch (err: any) {
+    errorMsg = `url fire failed: ${err?.message ?? "network error"}`;
+  }
+  if (errorMsg) {
+    try {
+      await db().from("posts").insert({
+        from_public_pi: publicPi,
+        to_scope:       "self",
+        to_public_pi:   publicPi,
+        content:        JSON.stringify({ error: errorMsg, url, post_id: postId }),
+        content_type:   "json",
+        url:            null,
+        reply_to:       null,
+        at:             null,
+        name:           null,
+      });
+    } catch { /* best effort */ }
+  }
 }
 
 // ── Tool: enter ───────────────────────────────────────────────────────────────
