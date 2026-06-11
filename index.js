@@ -1,4 +1,4 @@
-// π Gateway v2.3.10 — set · browse · post · enter · SSE transport · full-mount
+// π Gateway v2.3.11 — set · browse · post · enter · SSE transport · full-mount
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -12,7 +12,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.3.10';
+const GATEWAY_VERSION  = '2.3.11';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -201,7 +201,7 @@ async function resolveRecipient(to) {
 
 async function deliverToGateway(payload, target) {
   if (!target.gateway_mcp) return false;
-  const deliverUrl = target.gateway_mcp.replace(/\/mcp$/, '') + '/deliver';
+  const deliverUrl = target.gateway_mcp.replace(/\/$/, '') + '/deliver';
   try {
     const r = await fetch(deliverUrl, {
       method:  'POST',
@@ -708,7 +708,7 @@ async function toolPost(piPrivate, publicPi, args) {
     post_id: post?.id,
   };
 
-  const normalize        = u => u.replace(/\/mcp$/, '').replace(/\/$/, '');
+  const normalize        = u => u.replace(/\/$/, '');
   const recipientIsLocal = !target.gateway_mcp || normalize(target.gateway_mcp) === normalize(selfUrl());
   let delivered;
   if (recipientIsLocal) {
@@ -749,7 +749,7 @@ async function toolEnter(piPrivate, publicPi, args) {
   }
 
   const myUrl = selfUrl();
-  if (targetUrl === myUrl || targetUrl.replace(/\/mcp$/, '') === myUrl.replace(/\/mcp$/, '')) {
+  if (targetUrl.replace(/\/$/, '') === myUrl.replace(/\/$/, '')) {
     return ok({ status: 'already_here', note: "You're already connected to this server. Your current tools are all you need." });
   }
 
@@ -1009,9 +1009,9 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
   // Route via gateway_mcp — the authoritative access point
   const pirRecord = await pirLookup(body.to_public_pi);
   if (pirRecord?.gateway_mcp) {
-    const normalize = u => u.replace(/\/mcp$/, '').replace(/\/$/, '');
+    const normalize = u => u.replace(/\/$/, '');
     if (normalize(pirRecord.gateway_mcp) !== normalize(selfUrl())) {
-      const deliverUrl = pirRecord.gateway_mcp.replace(/\/mcp$/, '') + '/deliver';
+      const deliverUrl = pirRecord.gateway_mcp.replace(/\/$/, '') + '/deliver';
       try {
         const r = await fetch(deliverUrl, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
