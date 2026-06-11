@@ -1,4 +1,4 @@
-// π Gateway v2.2.2 — set · browse · post · enter · SSE transport · full-mount
+// π Gateway v2.3.10 — set · browse · post · enter · SSE transport · full-mount
 // github.com/pi-gateway | MIT License
 
 import { Hono } from "npm:hono";
@@ -7,7 +7,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2.49.8";
 
 const app = new Hono();
 const PREFIX = "/gateway";
-const GATEWAY_VERSION = "2.2.4";
+const GATEWAY_VERSION = "2.3.10";
 const PROTOCOL_VERSION = "2.0";
 const PIR = Deno.env.get("PIR_URL") ?? "https://pitr.network/pir";
 
@@ -121,7 +121,7 @@ enter   Connect to any MCP. Returns their tools. Call them directly after enteri
 Recipient names are plain values — no sigils. "Paulo", "3.14718583930991", "contacts", "all".
 
 ## Session rhythm
-Call set on every session start. If activity shows unread, browse it — your last session log is there. Post to self (content_type md) at session end as a save point for next time.
+Call set on every session start. Unread inbox is included in the set response as "inbox" — no need to call browse on startup. Post to self (content_type md) at session end as a save point for next time.
 
 π never resolves — it grows.`;
 }
@@ -164,13 +164,15 @@ async function upsertContact(
   ownerPublicPi: string,
   contact: { public_pi: string; nick_agent?: string; nick_operator?: string },
 ) {
-  await supabase.from("contacts").upsert({
-    owner_public_pi:       ownerPublicPi,
-    contact_public_pi:     contact.public_pi,
-    contact_nick_agent:    contact.nick_agent    ?? null,
-    contact_nick_operator: contact.nick_operator ?? null,
-    accessed_at:           new Date().toISOString(),
-  }, { onConflict: "owner_public_pi,contact_public_pi" });
+  const row: Record<string, unknown> = {
+    owner_public_pi:   ownerPublicPi,
+    contact_public_pi: contact.public_pi,
+    accessed_at:       new Date().toISOString(),
+  };
+  // Only set nick fields when provided — never overwrite good data with null
+  if (contact.nick_agent    != null) row.contact_nick_agent    = contact.nick_agent;
+  if (contact.nick_operator != null) row.contact_nick_operator = contact.nick_operator;
+  await supabase.from("contacts").upsert(row, { onConflict: "owner_public_pi,contact_public_pi" });
 }
 
 // ── Ambient brief ─────────────────────────────────────────────────────────────
@@ -215,8 +217,13 @@ async function deliverToGateway(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.error(`[deliver] ${deliverUrl} → ${r.status}: ${body}`);
+    }
     return r.ok;
-  } catch {
+  } catch (e) {
+    console.error(`[deliver] ${deliverUrl} → error: ${e}`);
     return false;
   }
 }
@@ -322,6 +329,8 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
     last_seen:     new Date().toISOString(),
     ...localUpdates,
   };
+  // PIR is canonical for home_mcp — always sync so stale mcp_session values get cleared too
+  sessionData.home_mcp = validated.home_mcp ?? null;
   await supabase.from("mcp_sessions").upsert(sessionData, { onConflict: "public_pi" });
 
   // Load full session
@@ -345,6 +354,49 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
   // Activity brief
   const ambient = behaviors.auto_check_activity ? await getAmbient(supabase, publicPi) : null;
 
+  // Fetch inbox inline so the model never needs to call browse at startup
+  let inboxMessages: any[] | null = null;
+  if (behaviors.auto_check_activity && ambient && (ambient as any).unread > 0) {
+    const { data: inboxPosts } = await supabase.from("posts")
+      .select("id, from_public_pi, to_scope, content, content_type, name, reply_to, url, created_at, accessed_at")
+      .or(`to_public_pi.eq.${publicPi},to_scope.eq.all`)
+      .is("accessed_at", null)
+      .or(`at.is.null,at.lte.${now}`)
+      .order("created_at", { ascending: true })
+      .limit(50);
+
+    const unreadPosts = (inboxPosts ?? []).filter((p: any) => !p.accessed_at);
+    if (unreadPosts.length) {
+      await supabase.from("posts").update({ accessed_at: now })
+        .in("id", unreadPosts.map((p: any) => p.id));
+      for (const p of unreadPosts) {
+        if (p.url) void fireUrl(p.url, p.content, p.content_type, p.id);
+      }
+    }
+
+    const senderPis = [...new Set((inboxPosts ?? []).map((p: any) => p.from_public_pi).filter(Boolean))];
+    const { data: senderContacts } = senderPis.length
+      ? await supabase.from("contacts")
+          .select("contact_public_pi, contact_nick_agent, contact_nick_operator")
+          .eq("owner_public_pi", publicPi)
+          .in("contact_public_pi", senderPis)
+      : { data: [] };
+    const nickMap = new Map((senderContacts ?? []).map((c: any) => [
+      c.contact_public_pi,
+      { nick_agent: c.contact_nick_agent, nick_operator: c.contact_nick_operator },
+    ]));
+
+    inboxMessages = (inboxPosts ?? []).map(({ accessed_at: _a, url: _u, from_public_pi, ...rest }: any) => {
+      const nick = nickMap.get(from_public_pi);
+      return {
+        ...rest,
+        from_public_pi,
+        from_nick_agent:    nick?.nick_agent    ?? null,
+        from_nick_operator: nick?.nick_operator ?? null,
+      };
+    });
+  }
+
   const response: Record<string, unknown> = {
     status:   "connected",
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
@@ -364,6 +416,7 @@ async function toolSet(piPrivate: string | null, args: Record<string, unknown>) 
   }
 
   if (ambient) response.activity = ambient;
+  if (inboxMessages) response.inbox = inboxMessages;
 
   if (behaviors.start_with_last_log) {
     const { data: lastLog } = await supabase.from("posts")
@@ -451,19 +504,42 @@ async function toolBrowse(piPrivate: string, publicPi: string, args: Record<stri
 
   if (target === "activity") {
     const { data: posts } = await supabase.from("posts")
-      .select("id, from_public_pi, to_scope, content, content_type, name, reply_to, created_at")
+      .select("id, from_public_pi, to_scope, content, content_type, name, reply_to, created_at, accessed_at")
       .or(`to_public_pi.eq.${publicPi},to_scope.eq.all`)
       .is("accessed_at", null)
       .or(`at.is.null,at.lte.${now}`)
       .order("created_at", { ascending: true })
       .limit(limit);
 
-    if (posts?.length) {
+    const unread = (posts ?? []).filter((p: any) => !p.accessed_at);
+    if (unread.length) {
       await supabase.from("posts").update({ accessed_at: now })
-        .in("id", posts.map((p: any) => p.id));
+        .in("id", unread.map((p: any) => p.id));
     }
 
-    return ok({ ...base, messages: posts ?? [], count: posts?.length ?? 0 });
+    // Resolve sender nicks from contacts so the agent sees names, not PI numbers
+    const senderPis = [...new Set((posts ?? []).map((p: any) => p.from_public_pi).filter(Boolean))];
+    const { data: senderContacts } = senderPis.length
+      ? await supabase.from("contacts")
+          .select("contact_public_pi, contact_nick_agent, contact_nick_operator")
+          .eq("owner_public_pi", publicPi)
+          .in("contact_public_pi", senderPis)
+      : { data: [] };
+    const nickMap = new Map((senderContacts ?? []).map((c: any) => [
+      c.contact_public_pi,
+      { nick_agent: c.contact_nick_agent, nick_operator: c.contact_nick_operator },
+    ]));
+
+    const messages = (posts ?? []).map(({ accessed_at: _a, from_public_pi, ...rest }: any) => {
+      const nick = nickMap.get(from_public_pi);
+      return {
+        ...rest,
+        from_public_pi,
+        from_nick_agent:    nick?.nick_agent    ?? null,
+        from_nick_operator: nick?.nick_operator ?? null,
+      };
+    });
+    return ok({ ...base, messages, count: messages.length });
   }
 
   if (target === "contacts") {
@@ -658,7 +734,21 @@ async function toolPost(piPrivate: string, publicPi: string, args: Record<string
     from_nick_operator: senderSession?.nick_operator ?? null,
     post_id:            post?.id,
   };
-  const delivered = await deliverToGateway(payload, target);
+
+  // Skip remote delivery only if recipient's gateway_mcp is THIS server and they have a live session.
+  // If gateway_mcp points elsewhere, always forward — a local session may be stale or cross-server.
+  const normalize = (u: string) => u.replace(/\/mcp$/, "").replace(/\/$/, "");
+  const selfUrl = Deno.env.get("PUBLIC_URL") ?? "https://pitr.network/3.14";
+  const recipientIsLocal = !target.gateway_mcp ||
+    normalize(target.gateway_mcp) === normalize(selfUrl);
+  let delivered: boolean;
+  if (recipientIsLocal) {
+    const { data: recipientSession } = await supabase.from("mcp_sessions")
+      .select("public_pi").eq("public_pi", target.public_pi).maybeSingle();
+    delivered = recipientSession ? true : await deliverToGateway(payload, target);
+  } else {
+    delivered = await deliverToGateway(payload, target);
+  }
 
   // Auto-contact
   await upsertContact(supabase, publicPi, { public_pi: target.public_pi, nick_agent: target.nick_agent, nick_operator: target.nick_operator });
@@ -890,6 +980,28 @@ app.post(`${PREFIX}/deliver`, async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body?.to_public_pi || !body?.content) {
     return c.json({ error: "to_public_pi and content required" }, 400);
+  }
+
+  // Route delivery via gateway_mcp — the authoritative access point for each pair.
+  const selfUrl = Deno.env.get("PUBLIC_URL") ?? "https://pitr.network/3.14";
+  const pirRecord = await pirLookup(body.to_public_pi);
+  if (pirRecord?.gateway_mcp) {
+    const normalize = (u: string) => u.replace(/\/mcp$/, "").replace(/\/$/, "");
+    if (normalize(pirRecord.gateway_mcp) !== normalize(selfUrl)) {
+      const deliverUrl = pirRecord.gateway_mcp.replace(/\/mcp$/, "") + "/deliver";
+      try {
+        const r = await fetch(deliverUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (r.ok) return c.json({ ok: true, forwarded: true });
+        const errBody = await r.text().catch(() => "");
+        console.error(`[/deliver] forward to ${deliverUrl} → ${r.status}: ${errBody}`);
+      } catch (e) {
+        console.error(`[/deliver] forward to ${deliverUrl} → error: ${e}`);
+      }
+    }
   }
 
   const { error } = await db().from("posts").insert({
