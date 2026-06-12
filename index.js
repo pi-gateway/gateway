@@ -1,4 +1,4 @@
-// π Gateway v2.3.11 — set · browse · post · enter · SSE transport · full-mount
+// π Gateway v2.3.12 — set · browse · post · enter · SSE transport · full-mount
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -201,7 +201,7 @@ async function resolveRecipient(to) {
 
 async function deliverToGateway(payload, target) {
   if (!target.gateway_mcp) return false;
-  const deliverUrl = target.gateway_mcp.replace(/\/$/, '') + '/deliver';
+  const deliverUrl = target.gateway_mcp.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
   try {
     const r = await fetch(deliverUrl, {
       method:  'POST',
@@ -1011,7 +1011,7 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
   if (pirRecord?.gateway_mcp) {
     const normalize = u => u.replace(/\/$/, '');
     if (normalize(pirRecord.gateway_mcp) !== normalize(selfUrl())) {
-      const deliverUrl = pirRecord.gateway_mcp.replace(/\/$/, '') + '/deliver';
+      const deliverUrl = pirRecord.gateway_mcp.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
       try {
         const r = await fetch(deliverUrl, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
