@@ -1026,12 +1026,13 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
   }
 
   try {
+    // reply_to from a remote server references a foreign DB ID — drop it to avoid FK violation
     await pool.query(`
       INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to)
-      VALUES ($1, 'nickname', $2, $3, $4, $5, $6)
+      VALUES ($1, 'nickname', $2, $3, $4, $5, NULL)
     `, [
       body.from_public_pi ?? null, body.to_public_pi, body.content,
-      body.content_type ?? 'json', body.name ?? null, body.reply_to ?? null,
+      body.content_type ?? 'json', body.name ?? null,
     ]);
   } catch (e) {
     return res.status(500).json({ error: String(e) });
@@ -1121,7 +1122,7 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
   try {
     await pool.query(`
       INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to)
-      VALUES (NULL, 'nickname', $1, $2, 'md', NULL, NULL)
+      VALUES ('', 'nickname', $1, $2, 'md', NULL, NULL)
     `, [target.public_pi, content]);
   } catch (e) {
     return res.status(500).json({ error: 'Delivery failed' });
@@ -1170,7 +1171,7 @@ app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
   try {
     await pool.query(`
       INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to)
-      VALUES (NULL, 'nickname', $1, $2, 'md', NULL, NULL)
+      VALUES ('', 'nickname', $1, $2, 'md', NULL, NULL)
     `, [target.public_pi, content]);
   } catch (e) {
     return res.status(500).json({ error: 'Delivery failed' });
