@@ -336,7 +336,6 @@ async function toolSet(piPrivate, args, accessKey = null) {
 
   // Config updates
   const configKeys  = ['personality', 'behaviors', 'home_mcp', 'gateway_mcp', 'cc_public_pi'];
-  const pirKeys     = ['nick_operator', 'nick_agent'];
   const localUpdates = {};
   const pirUpdates  = { gateway_mcp: selfUrl() };
 
@@ -346,9 +345,8 @@ async function toolSet(piPrivate, args, accessKey = null) {
       else localUpdates[key] = args[key];
     }
   }
-  for (const key of pirKeys) {
-    if (args[key] !== undefined) pirUpdates[key] = args[key];
-  }
+  if (args.rename_operator !== undefined) pirUpdates.nick_operator = args.rename_operator;
+  if (args.rename_agent    !== undefined) pirUpdates.nick_agent    = args.rename_agent;
 
   await pirUpdate(piPrivate, pirUpdates);
 
