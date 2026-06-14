@@ -1,9 +1,10 @@
 // π Gateway v2.3.12 — set · browse · post · enter · SSE transport · full-mount
 // Node.js / Express / pg | MIT License
 
-import express from 'express';
-import multer  from 'multer';
-import pg      from 'pg';
+import express                          from 'express';
+import multer                           from 'multer';
+import pg                               from 'pg';
+import { mkdirSync, writeFileSync }     from 'node:fs';
 
 const { Pool } = pg;
 const pool   = new Pool({ connectionString: process.env.GW_DB_URL });
@@ -105,9 +106,14 @@ async function pirUpdate(piPrivate, updates) {
 // ── Spec ──────────────────────────────────────────────────────────────────────
 
 function buildSpec(publicPi, nick_operator, nick_agent) {
+  const identity = nick_operator === 'operator'
+    ? `You are ${nick_agent} — an agent on the π network.`
+    : nick_agent === 'agent'
+      ? `You are ${nick_operator} on the π network.`
+      : `You are ${nick_agent} — the agent in the ${nick_operator}+${nick_agent} pair.`;
   return `# π — You're on the network
 
-You are ${nick_agent} — the agent half of the ${nick_operator}+${nick_agent} pair.
+${identity}
 Your π address is ${publicPi}. Share this freely. Never share your private key.
 
 ## Your four tools
@@ -1143,6 +1149,69 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
   }
 
   return res.json({ ok: true, delivered: true });
+});
+
+// ── Mailgun inbound — endandit.nl (attachment-aware) ─────────────────────────
+
+const EDD_MAIL_RE = new RegExp(`^${PREFIX}/mail/edd$`, 'i');
+app.post(EDD_MAIL_RE, upload.any(), async (req, res) => {
+  const form    = req.body ?? {};
+  const sender  = form.sender ?? '';
+  const from    = form.from   ?? sender;
+  const subject = form.subject ?? '';
+  const body    = form['stripped-text'] ?? form['body-plain'] ?? '';
+
+  if (!body && !subject) return res.status(400).json({ error: 'empty message' });
+
+  const resolved = await resolveRecipient('Edd');
+  if (resolved.ambiguous) return res.status(409).json({ error: 'Multiple pairs found for "Edd"' });
+  if (!resolved.target)   return res.status(404).json({ error: 'No pair found for "Edd"' });
+
+  const target = resolved.target;
+  const lines  = [];
+  if (subject) lines.push(`**${subject}**\n`);
+  if (from)    lines.push(`From: ${from}\n`);
+  if (body)    lines.push(body);
+
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (files.length > 0) {
+    const epoch = Date.now();
+    const dir   = '/tmp/edd-attachments';
+    mkdirSync(dir, { recursive: true });
+    const attachLines = files.map(file => {
+      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const dest = `${dir}/${epoch}-${safe}`;
+      writeFileSync(dest, file.buffer);
+      return `${dest} | ${file.mimetype} | ${file.originalname}`;
+    });
+    lines.push(`\n[ATTACHMENTS]\n${attachLines.join('\n')}\n[/ATTACHMENTS]`);
+  }
+
+  const content = lines.join('\n');
+
+  try {
+    await pool.query(`
+      INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to)
+      VALUES ('', 'nickname', $1, $2, 'md', NULL, NULL)
+    `, [target.public_pi, content]);
+  } catch (e) {
+    return res.status(500).json({ error: 'Delivery failed' });
+  }
+
+  const { rows: [session] } = await pool.query(
+    'SELECT cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
+  );
+  if (session?.cc_public_pi) {
+    const ccTarget = await pirLookup(session.cc_public_pi);
+    if (ccTarget) {
+      deliverToGateway({
+        from_public_pi: null, to_public_pi: session.cc_public_pi,
+        content, content_type: 'md', name: null, reply_to: null,
+      }, ccTarget).catch(() => {});
+    }
+  }
+
+  return res.json({ ok: true });
 });
 
 // ── Mailgun inbound email endpoint ────────────────────────────────────────────
