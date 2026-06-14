@@ -62,12 +62,14 @@ function inferContentType(content) {
 
 // ── PIR ───────────────────────────────────────────────────────────────────────
 
-async function pirValidate(piPrivate) {
+async function pirValidate(piPrivate, access_key = null) {
+  const body = access_key ? JSON.stringify({ access_key }) : undefined;
   const r = await fetch(`${PIR}/validate`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+    body,
   });
-  return r.ok ? r.json() : null;
+  return r.json().catch(() => null);
 }
 
 async function pirLookup(publicPi) {
@@ -254,7 +256,7 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
 
 // ── Tool: set ─────────────────────────────────────────────────────────────────
 
-async function toolSet(piPrivate, args) {
+async function toolSet(piPrivate, args, accessKey = null) {
   // Commission flow — no identity
   if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
     const { nick_operator, nick_agent, private_pi } = args;
@@ -312,6 +314,24 @@ async function toolSet(piPrivate, args) {
     });
   }
 
+  // set_access_key: set or remove access key, return config instructions
+  if (args?.set_access_key !== undefined) {
+    const r = await fetch(`${PIR}/access-key`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+      body:    JSON.stringify({ access_key: args.set_access_key || null }),
+    });
+    const data = r.ok ? await r.json() : null;
+    if (!data?.ok) return fail('Could not set access key. Check your π credentials.');
+    if (!args.set_access_key) return ok({ access_key_set: false, note: 'Access key removed. Remove X-Pi-Access-Key from your MCP config headers.' });
+    return ok({
+      access_key_set: true,
+      note: 'Access key set. Add X-Pi-Access-Key to your MCP config headers alongside X-Pi-Private:',
+      header: `X-Pi-Access-Key:${args.set_access_key}`,
+      mcp_args: ['--header', `X-Pi-Access-Key:${args.set_access_key}`],
+    });
+  }
+
   const publicPi = toPublicPi(piPrivate);
 
   // Config updates
@@ -332,8 +352,8 @@ async function toolSet(piPrivate, args) {
 
   await pirUpdate(piPrivate, pirUpdates);
 
-  const validated = await pirValidate(piPrivate);
-  if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
+  const validated = await pirValidate(piPrivate, accessKey);
+  if (!validated?.valid) return fail(validated?.error === 'access_key required' ? 'Access key required. Call set({ access_key: "your-key" }).' : 'Identity not found in PIR. Your private key may be invalid.');
 
   // Upsert session — always write core fields; write config fields only when provided
   const upsertCols = ['public_pi', 'nick_agent', 'nick_operator', 'last_seen', 'home_mcp'];
@@ -897,7 +917,7 @@ const BASE_TOOLS = [
 
 // ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
-async function handleJsonRpc(piPrivate, body) {
+async function handleJsonRpc(piPrivate, body, accessKey = null) {
   const { method, id, params } = body;
 
   if (method === 'initialize') {
@@ -950,7 +970,7 @@ async function handleJsonRpc(piPrivate, body) {
       let result;
 
       if (toolName === 'set') {
-        result = await toolSet(piPrivate, args);
+        result = await toolSet(piPrivate, args, accessKey);
       } else {
         if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
           return { jsonrpc: '2.0', id, result: noIdentity() };
@@ -992,7 +1012,7 @@ async function handleJsonRpc(piPrivate, body) {
 app.use(express.json());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pi-Private');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pi-Private, X-Pi-Access-Key');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -1357,9 +1377,10 @@ ${Object.entries(data.setup.config_locations).map(([a, paths]) =>
 
 app.post(`${PREFIX}/mcp`, async (req, res) => {
   const piPrivate = req.headers['x-pi-private'] ?? null;
+  const accessKey = req.headers['x-pi-access-key'] ?? null;
   const body      = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  return res.json(await handleJsonRpc(piPrivate, body));
+  return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
 // ── SSE transport ─────────────────────────────────────────────────────────────
@@ -1385,9 +1406,10 @@ app.get(`${PREFIX}/sse`, (req, res) => {
 
 app.post(`${PREFIX}/messages`, async (req, res) => {
   const piPrivate = req.headers['x-pi-private'] ?? null;
+  const accessKey = req.headers['x-pi-access-key'] ?? null;
   const body      = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  return res.json(await handleJsonRpc(piPrivate, body));
+  return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
