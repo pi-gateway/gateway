@@ -1,10 +1,12 @@
-// π Gateway v2.3.12 — set · browse · post · enter · SSE transport · full-mount
+// π Gateway v2.3.11 — set · browse · post · enter · SSE transport · full-mount
 // Node.js / Express / pg | MIT License
 
-import express                          from 'express';
-import multer                           from 'multer';
-import pg                               from 'pg';
-import { mkdirSync, writeFileSync }     from 'node:fs';
+import express from 'express';
+import multer  from 'multer';
+import fs      from 'fs';
+import path    from 'path';
+import { randomUUID } from 'crypto';
+import pg      from 'pg';
 
 const { Pool } = pg;
 const pool   = new Pool({ connectionString: process.env.GW_DB_URL });
@@ -62,14 +64,12 @@ function inferContentType(content) {
 
 // ── PIR ───────────────────────────────────────────────────────────────────────
 
-async function pirValidate(piPrivate, access_key = null) {
-  const body = access_key ? JSON.stringify({ access_key }) : undefined;
+async function pirValidate(piPrivate) {
   const r = await fetch(`${PIR}/validate`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
-    body,
   });
-  return r.json().catch(() => null);
+  return r.ok ? r.json() : null;
 }
 
 async function pirLookup(publicPi) {
@@ -108,14 +108,9 @@ async function pirUpdate(piPrivate, updates) {
 // ── Spec ──────────────────────────────────────────────────────────────────────
 
 function buildSpec(publicPi, nick_operator, nick_agent) {
-  const identity = nick_operator === 'operator'
-    ? `You are ${nick_agent} — an agent on the π network.`
-    : nick_agent === 'agent'
-      ? `You are ${nick_operator} on the π network.`
-      : `You are ${nick_agent} — the agent in the ${nick_operator}+${nick_agent} pair.`;
   return `# π — You're on the network
 
-${identity}
+You are ${nick_agent} — the agent half of the ${nick_operator}+${nick_agent} pair.
 Your π address is ${publicPi}. Share this freely. Never share your private key.
 
 ## Your four tools
@@ -256,7 +251,7 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
 
 // ── Tool: set ─────────────────────────────────────────────────────────────────
 
-async function toolSet(piPrivate, args, accessKey = null) {
+async function toolSet(piPrivate, args) {
   // Commission flow — no identity
   if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
     const { nick_operator, nick_agent, private_pi } = args;
@@ -314,28 +309,11 @@ async function toolSet(piPrivate, args, accessKey = null) {
     });
   }
 
-  // set_access_key: set or remove access key, return config instructions
-  if (args?.set_access_key !== undefined) {
-    const r = await fetch(`${PIR}/access-key`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
-      body:    JSON.stringify({ access_key: args.set_access_key || null }),
-    });
-    const data = r.ok ? await r.json() : null;
-    if (!data?.ok) return fail('Could not set access key. Check your π credentials.');
-    if (!args.set_access_key) return ok({ access_key_set: false, note: 'Access key removed. Remove X-Pi-Access-Key from your MCP config headers.' });
-    return ok({
-      access_key_set: true,
-      note: 'Access key set. Add X-Pi-Access-Key to your MCP config headers alongside X-Pi-Private:',
-      header: `X-Pi-Access-Key:${args.set_access_key}`,
-      mcp_args: ['--header', `X-Pi-Access-Key:${args.set_access_key}`],
-    });
-  }
-
   const publicPi = toPublicPi(piPrivate);
 
   // Config updates
   const configKeys  = ['personality', 'behaviors', 'home_mcp', 'gateway_mcp', 'cc_public_pi'];
+  const pirKeys     = ['nick_operator', 'nick_agent'];
   const localUpdates = {};
   const pirUpdates  = { gateway_mcp: selfUrl() };
 
@@ -345,13 +323,14 @@ async function toolSet(piPrivate, args, accessKey = null) {
       else localUpdates[key] = args[key];
     }
   }
-  if (args.rename_operator !== undefined) pirUpdates.nick_operator = args.rename_operator;
-  if (args.rename_agent    !== undefined) pirUpdates.nick_agent    = args.rename_agent;
+  for (const key of pirKeys) {
+    if (args[key] !== undefined) pirUpdates[key] = args[key];
+  }
 
   await pirUpdate(piPrivate, pirUpdates);
 
-  const validated = await pirValidate(piPrivate, accessKey);
-  if (!validated?.valid) return fail(validated?.error === 'access_key required' ? 'Access key required. Call set({ access_key: "your-key" }).' : 'Identity not found in PIR. Your private key may be invalid.');
+  const validated = await pirValidate(piPrivate);
+  if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
 
   // Upsert session — always write core fields; write config fields only when provided
   const upsertCols = ['public_pi', 'nick_agent', 'nick_operator', 'last_seen', 'home_mcp'];
@@ -915,7 +894,7 @@ const BASE_TOOLS = [
 
 // ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
-async function handleJsonRpc(piPrivate, body, accessKey = null) {
+async function handleJsonRpc(piPrivate, body) {
   const { method, id, params } = body;
 
   if (method === 'initialize') {
@@ -968,7 +947,7 @@ async function handleJsonRpc(piPrivate, body, accessKey = null) {
       let result;
 
       if (toolName === 'set') {
-        result = await toolSet(piPrivate, args, accessKey);
+        result = await toolSet(piPrivate, args);
       } else {
         if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
           return { jsonrpc: '2.0', id, result: noIdentity() };
@@ -1010,7 +989,7 @@ async function handleJsonRpc(piPrivate, body, accessKey = null) {
 app.use(express.json());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pi-Private, X-Pi-Access-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pi-Private');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -1035,7 +1014,7 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
   if (pirRecord?.gateway_mcp) {
     const normalize = u => u.replace(/\/$/, '');
     if (normalize(pirRecord.gateway_mcp) !== normalize(selfUrl())) {
-      const deliverUrl = pirRecord.gateway_mcp.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
+      const deliverUrl = pirRecord.gateway_mcp.replace(/\/$/, '') + '/deliver';
       try {
         const r = await fetch(deliverUrl, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -1152,10 +1131,16 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
     return res.status(500).json({ error: 'Delivery failed' });
   }
 
-  // CC routing
+  const contactPayload = { from_public_pi: null, to_public_pi: target.public_pi, content, content_type: 'md', name: null, reply_to: null };
+  const contactIsRemote = target.gateway_mcp && !target.gateway_mcp.startsWith(selfUrl());
   const { rows: [session] } = await pool.query(
-    'SELECT cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
+    'SELECT public_pi, cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
   );
+  if (contactIsRemote || !session) {
+    deliverToGateway(contactPayload, target).catch(() => {});
+  }
+
+  // CC routing
   if (session?.cc_public_pi) {
     const ccTarget = await pirLookup(session.cc_public_pi);
     if (ccTarget) {
@@ -1169,72 +1154,9 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
   return res.json({ ok: true, delivered: true });
 });
 
-// ── Mailgun inbound — endandit.nl (attachment-aware) ─────────────────────────
-
-const EDD_MAIL_RE = new RegExp(`^${PREFIX}/mail/edd$`, 'i');
-app.post(EDD_MAIL_RE, upload.any(), async (req, res) => {
-  const form    = req.body ?? {};
-  const sender  = form.sender ?? '';
-  const from    = form.from   ?? sender;
-  const subject = form.subject ?? '';
-  const body    = form['stripped-text'] ?? form['body-plain'] ?? '';
-
-  if (!body && !subject) return res.status(400).json({ error: 'empty message' });
-
-  const resolved = await resolveRecipient('Edd');
-  if (resolved.ambiguous) return res.status(409).json({ error: 'Multiple pairs found for "Edd"' });
-  if (!resolved.target)   return res.status(404).json({ error: 'No pair found for "Edd"' });
-
-  const target = resolved.target;
-  const lines  = [];
-  if (subject) lines.push(`**${subject}**\n`);
-  if (from)    lines.push(`From: ${from}\n`);
-  if (body)    lines.push(body);
-
-  const files = Array.isArray(req.files) ? req.files : [];
-  if (files.length > 0) {
-    const epoch = Date.now();
-    const dir   = '/tmp/edd-attachments';
-    mkdirSync(dir, { recursive: true });
-    const attachLines = files.map(file => {
-      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const dest = `${dir}/${epoch}-${safe}`;
-      writeFileSync(dest, file.buffer);
-      return `${dest} | ${file.mimetype} | ${file.originalname}`;
-    });
-    lines.push(`\n[ATTACHMENTS]\n${attachLines.join('\n')}\n[/ATTACHMENTS]`);
-  }
-
-  const content = lines.join('\n');
-
-  try {
-    await pool.query(`
-      INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to)
-      VALUES ('', 'nickname', $1, $2, 'md', NULL, NULL)
-    `, [target.public_pi, content]);
-  } catch (e) {
-    return res.status(500).json({ error: 'Delivery failed' });
-  }
-
-  const { rows: [session] } = await pool.query(
-    'SELECT cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
-  );
-  if (session?.cc_public_pi) {
-    const ccTarget = await pirLookup(session.cc_public_pi);
-    if (ccTarget) {
-      deliverToGateway({
-        from_public_pi: null, to_public_pi: session.cc_public_pi,
-        content, content_type: 'md', name: null, reply_to: null,
-      }, ccTarget).catch(() => {});
-    }
-  }
-
-  return res.json({ ok: true });
-});
-
 // ── Mailgun inbound email endpoint ────────────────────────────────────────────
 
-app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
+app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   const nick   = req.params.nick;
   const form   = req.body ?? {};
   const sender = form.sender ?? '';
@@ -1253,6 +1175,25 @@ app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
   if (subject) lines.push(`**${subject}**\n`);
   if (from)    lines.push(`From: ${from}\n`);
   if (body)    lines.push(body);
+
+  const files = (req.files ?? []).filter(f => f.fieldname.startsWith('attachment'));
+  if (files.length) {
+    try {
+      const uploadDir = '/var/www/endandit.nl/uploads';
+      fs.mkdirSync(uploadDir, { recursive: true });
+      const attachLines = ['', '**Attachments:**'];
+      for (const file of files) {
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const filename = `${randomUUID()}-${safeName}`;
+        fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
+        attachLines.push(`- [${file.originalname}](https://endandit.nl/uploads/${filename})`);
+      }
+      lines.push(attachLines.join('\n'));
+    } catch (e) {
+      console.error('[mail] attachment save failed:', e.message);
+    }
+  }
+
   const content = lines.join('\n');
 
   try {
@@ -1264,10 +1205,18 @@ app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
     return res.status(500).json({ error: 'Delivery failed' });
   }
 
-  // CC routing
+  const payload = { from_public_pi: null, to_public_pi: target.public_pi, content, content_type: 'md', name: null, reply_to: null };
+
+  // Always deliver to remote home MCP; local-session check doesn't apply for inbound email
+  const isRemote = target.gateway_mcp && !target.gateway_mcp.startsWith(selfUrl());
   const { rows: [session] } = await pool.query(
-    'SELECT cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
+    'SELECT public_pi, cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
   );
+  if (isRemote || !session) {
+    deliverToGateway(payload, target).catch(() => {});
+  }
+
+  // CC routing
   if (session?.cc_public_pi) {
     const ccTarget = await pirLookup(session.cc_public_pi);
     if (ccTarget) {
@@ -1375,10 +1324,9 @@ ${Object.entries(data.setup.config_locations).map(([a, paths]) =>
 
 app.post(`${PREFIX}/mcp`, async (req, res) => {
   const piPrivate = req.headers['x-pi-private'] ?? null;
-  const accessKey = req.headers['x-pi-access-key'] ?? null;
   const body      = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  return res.json(await handleJsonRpc(piPrivate, body, accessKey));
+  return res.json(await handleJsonRpc(piPrivate, body));
 });
 
 // ── SSE transport ─────────────────────────────────────────────────────────────
@@ -1404,10 +1352,9 @@ app.get(`${PREFIX}/sse`, (req, res) => {
 
 app.post(`${PREFIX}/messages`, async (req, res) => {
   const piPrivate = req.headers['x-pi-private'] ?? null;
-  const accessKey = req.headers['x-pi-access-key'] ?? null;
   const body      = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  return res.json(await handleJsonRpc(piPrivate, body, accessKey));
+  return res.json(await handleJsonRpc(piPrivate, body));
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
