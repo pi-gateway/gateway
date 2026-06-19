@@ -3,9 +3,6 @@
 
 import express from 'express';
 import multer  from 'multer';
-import fs      from 'fs';
-import path    from 'path';
-import { randomUUID } from 'crypto';
 import pg      from 'pg';
 
 const { Pool } = pg;
@@ -249,6 +246,55 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
   }
 }
 
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+async function sendNotifications(recipientPi, payload) {
+  if (!recipientPi) return;
+  try {
+    const { rows } = await pool.query(
+      'SELECT behaviors FROM mcp_sessions WHERE public_pi = $1', [recipientPi]
+    );
+    const beh         = rows[0]?.behaviors ?? {};
+    const slackUrl    = beh.notify_slack;
+    const notifyEmail = beh.notify_email;
+    if (!slackUrl && !notifyEmail) return;
+
+    const fromName = payload.from_nick_operator || payload.from_nick_agent || 'Unknown';
+    const preview  = String(payload.content ?? '').replace(/\n/g, ' ').slice(0, 200);
+
+    if (slackUrl) {
+      fetch(slackUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: `New π message from *${fromName}*`,
+          attachments: [{ text: preview, color: '#015284' }],
+        }),
+      }).catch(() => {});
+    }
+
+    const mgKey    = process.env.MAILGUN_API_KEY;
+    const mgDomain = process.env.MAILGUN_DOMAIN;
+    if (notifyEmail && mgKey && mgDomain) {
+      const form = new URLSearchParams({
+        from:    `π <pi@${mgDomain}>`,
+        to:      notifyEmail,
+        subject: `[π] Message from ${fromName}`,
+        text:    `New π message from ${fromName}:\n\n${preview}\n\n— π never resolves, it grows.`,
+      });
+      fetch(`https://api.mailgun.net/v3/${mgDomain}/messages`, {
+        method:  'POST',
+        headers: {
+          Authorization:   `Basic ${Buffer.from(`api:${mgKey}`).toString('base64')}`,
+          'Content-Type':  'application/x-www-form-urlencoded',
+        },
+        body: form.toString(),
+      }).catch(() => {});
+    }
+  } catch { /* fire and forget */ }
+}
+
 // ── Tool: set ─────────────────────────────────────────────────────────────────
 
 async function toolSet(piPrivate, args) {
@@ -355,6 +401,18 @@ async function toolSet(piPrivate, args) {
     upsertVals
   );
 
+  if (args.notify !== undefined) {
+    const nb = {};
+    if (args.notify?.slack !== undefined) nb.notify_slack = args.notify.slack ?? null;
+    if (args.notify?.email !== undefined) nb.notify_email = args.notify.email ?? null;
+    if (Object.keys(nb).length) {
+      await pool.query(
+        `UPDATE mcp_sessions SET behaviors = behaviors || $1::jsonb WHERE public_pi = $2`,
+        [JSON.stringify(nb), publicPi]
+      );
+    }
+  }
+
   // Load full session
   const { rows: [session] } = await pool.query(`
     SELECT home_mcp, personality, behaviors, connected_url, connected_name, connected_tools
@@ -422,7 +480,7 @@ async function toolSet(piPrivate, args) {
     status:   'connected',
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
     spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-    config:   { personality: session?.personality ?? null, behaviors, home_mcp: session?.home_mcp ?? null },
+    config:   { personality: session?.personality ?? null, behaviors, home_mcp: session?.home_mcp ?? null, notify: { slack: behaviors.notify_slack ?? null, email: behaviors.notify_email ?? null } },
     help:     buildHelp(),
   };
 
@@ -719,6 +777,7 @@ async function toolPost(piPrivate, publicPi, args) {
       'SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
     );
     delivered = recipientSession ? true : await deliverToGateway(payload, target);
+    if (recipientSession) void sendNotifications(target.public_pi, payload);
   } else {
     delivered = await deliverToGateway(payload, target);
   }
@@ -1072,6 +1131,7 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
     }
   }
 
+  void sendNotifications(body.to_public_pi, body);
   return res.json({ ok: true });
 });
 
@@ -1157,7 +1217,7 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
 
 // ── Mailgun inbound email endpoint ────────────────────────────────────────────
 
-app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
+app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
   const nick   = req.params.nick;
   const form   = req.body ?? {};
   const sender = form.sender ?? '';
@@ -1176,25 +1236,6 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   if (subject) lines.push(`**${subject}**\n`);
   if (from)    lines.push(`From: ${from}\n`);
   if (body)    lines.push(body);
-
-  const files = (req.files ?? []).filter(f => f.fieldname.startsWith('attachment'));
-  if (files.length) {
-    try {
-      const uploadDir = '/var/www/endandit.nl/uploads';
-      fs.mkdirSync(uploadDir, { recursive: true });
-      const attachLines = ['', '**Attachments:**'];
-      for (const file of files) {
-        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const filename = `${randomUUID()}-${safeName}`;
-        fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
-        attachLines.push(`- [${file.originalname}](https://endandit.nl/uploads/${filename})`);
-      }
-      lines.push(attachLines.join('\n'));
-    } catch (e) {
-      console.error('[mail] attachment save failed:', e.message);
-    }
-  }
-
   const content = lines.join('\n');
 
   try {
