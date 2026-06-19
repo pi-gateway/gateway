@@ -3,6 +3,9 @@
 
 import express from 'express';
 import multer  from 'multer';
+import fs      from 'fs';
+import path    from 'path';
+import { randomUUID } from 'crypto';
 import pg      from 'pg';
 
 const { Pool } = pg;
@@ -1154,7 +1157,7 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
 
 // ── Mailgun inbound email endpoint ────────────────────────────────────────────
 
-app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
+app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   const nick   = req.params.nick;
   const form   = req.body ?? {};
   const sender = form.sender ?? '';
@@ -1173,6 +1176,25 @@ app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
   if (subject) lines.push(`**${subject}**\n`);
   if (from)    lines.push(`From: ${from}\n`);
   if (body)    lines.push(body);
+
+  const files = (req.files ?? []).filter(f => f.fieldname.startsWith('attachment'));
+  if (files.length) {
+    try {
+      const uploadDir = '/var/www/endandit.nl/uploads';
+      fs.mkdirSync(uploadDir, { recursive: true });
+      const attachLines = ['', '**Attachments:**'];
+      for (const file of files) {
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const filename = `${randomUUID()}-${safeName}`;
+        fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
+        attachLines.push(`- [${file.originalname}](https://endandit.nl/uploads/${filename})`);
+      }
+      lines.push(attachLines.join('\n'));
+    } catch (e) {
+      console.error('[mail] attachment save failed:', e.message);
+    }
+  }
+
   const content = lines.join('\n');
 
   try {
