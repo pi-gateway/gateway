@@ -201,7 +201,7 @@ async function resolveRecipient(to) {
 
 async function deliverToGateway(payload, target) {
   if (!target.gateway_mcp) return false;
-  const deliverUrl = target.gateway_mcp.replace(/\/$/, '') + '/deliver';
+  const deliverUrl = target.gateway_mcp.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
   try {
     const r = await fetch(deliverUrl, {
       method:  'POST',
@@ -984,6 +984,7 @@ async function handleJsonRpc(piPrivate, body) {
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pi-Private');
@@ -1128,10 +1129,16 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
     return res.status(500).json({ error: 'Delivery failed' });
   }
 
-  // CC routing
+  const contactPayload = { from_public_pi: null, to_public_pi: target.public_pi, content, content_type: 'md', name: null, reply_to: null };
+  const contactIsRemote = target.gateway_mcp && !target.gateway_mcp.startsWith(selfUrl());
   const { rows: [session] } = await pool.query(
-    'SELECT cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
+    'SELECT public_pi, cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
   );
+  if (contactIsRemote || !session) {
+    deliverToGateway(contactPayload, target).catch(() => {});
+  }
+
+  // CC routing
   if (session?.cc_public_pi) {
     const ccTarget = await pirLookup(session.cc_public_pi);
     if (ccTarget) {
@@ -1177,10 +1184,18 @@ app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
     return res.status(500).json({ error: 'Delivery failed' });
   }
 
-  // CC routing
+  const payload = { from_public_pi: null, to_public_pi: target.public_pi, content, content_type: 'md', name: null, reply_to: null };
+
+  // Always deliver to remote home MCP; local-session check doesn't apply for inbound email
+  const isRemote = target.gateway_mcp && !target.gateway_mcp.startsWith(selfUrl());
   const { rows: [session] } = await pool.query(
-    'SELECT cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
+    'SELECT public_pi, cc_public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
   );
+  if (isRemote || !session) {
+    deliverToGateway(payload, target).catch(() => {});
+  }
+
+  // CC routing
   if (session?.cc_public_pi) {
     const ccTarget = await pirLookup(session.cc_public_pi);
     if (ccTarget) {
