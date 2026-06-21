@@ -1217,15 +1217,16 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
 
 // ── Mailgun inbound email endpoint ────────────────────────────────────────────
 
-app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
+app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   const nick   = req.params.nick;
   const form   = req.body ?? {};
   const sender = form.sender ?? '';
   const from   = form.from   ?? sender;
   const subject = form.subject ?? '';
   const body    = form['stripped-text'] ?? form['body-plain'] ?? '';
+  const files   = req.files ?? [];
 
-  if (!body && !subject) return res.status(400).json({ error: 'empty message' });
+  if (!body && !subject && !files.length) return res.status(400).json({ error: 'empty message' });
 
   const resolved = await resolveRecipient(nick);
   if (resolved.ambiguous) return res.status(409).json({ error: `Multiple pairs found for "${nick}"` });
@@ -1236,6 +1237,7 @@ app.post(`${PREFIX}/mail/:nick`, upload.none(), async (req, res) => {
   if (subject) lines.push(`**${subject}**\n`);
   if (from)    lines.push(`From: ${from}\n`);
   if (body)    lines.push(body);
+  if (files.length) lines.push('\n**Attachments:** ' + files.map(f => f.originalname + ' (' + f.mimetype + ', ' + Math.round(f.size/1024) + 'KB)').join(', '));
   const content = lines.join('\n');
 
   try {
