@@ -1277,6 +1277,12 @@ button,a.btn{display:block;width:100%;margin-top:2rem;padding:.65rem;background:
 button:hover,a.btn:hover{background:#7EAB85}
 .err{color:#e07070;font-size:.82rem;margin:.75rem 0 0}
 .key-box{font-family:monospace;font-size:.88rem;background:rgba(107,143,113,0.07);border:1px solid rgba(107,143,113,0.22);border-radius:3px;padding:.85rem 1rem;word-break:break-all;color:#7EAB85;margin:.5rem 0 .75rem;cursor:pointer;user-select:all;line-height:1.5}
+.slabel{font-size:.68rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:rgba(255,255,255,0.35);margin-bottom:.3rem;display:block}
+.copy-wrap{display:flex;align-items:center;gap:10px;background:rgba(107,143,113,0.07);border:1px solid rgba(107,143,113,0.22);border-radius:3px;padding:.75rem 1rem;margin:.3rem 0}
+.copy-val{font-family:monospace;font-size:.88rem;color:#7EAB85;flex:1;word-break:break-all;line-height:1.5}
+.copy-btn{flex-shrink:0;background:transparent;border:1px solid rgba(107,143,113,0.30);border-radius:2px;color:#6B8F71;font-size:.68rem;font-weight:600;letter-spacing:.04em;cursor:pointer;padding:.2rem .5rem;transition:color .15s,border-color .15s;width:auto;margin:0}
+.copy-btn:hover{color:#7EAB85;border-color:rgba(107,143,113,0.55)}
+.share-note{color:rgba(255,255,255,0.25);font-size:.75rem;margin:.35rem 0 0;line-height:1.4}
 .warn{color:rgba(255,200,100,0.65);font-size:.76rem;font-weight:600;margin:0 0 1.4rem}
 </style></head>
 <body><div class="wrap">${body}</div></body></html>`;
