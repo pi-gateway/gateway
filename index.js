@@ -1341,11 +1341,8 @@ app.get(`${PREFIX}/authorize`, (req, res) => {
 <button type="submit">Connect</button>
 </form>
 <script>
-const ops=['lovelace','hopper','turing','hamilton','johnson','feynman','tesla','shannon','darwin','curie','linus','gauss'];
-const ags=['oracle','sage','archie','sherlock','compass','newton','euclid','pascal','fibonacci','wren','meridian','copernicus','kepler','leibniz'];
-const pick=a=>a[Math.floor(Math.random()*a.length)];
-document.getElementById('op').placeholder=pick(ops);
-document.getElementById('ag').placeholder=pick(ags);
+document.getElementById('op').placeholder='what people call you';
+document.getElementById('ag').placeholder='what you call your agent — if nobody’s looking';
 document.getElementById('pikey').placeholder='';
 </script>`));
 });
