@@ -1,11 +1,11 @@
-// π Gateway v2.3.11 — set · browse · post · enter · SSE transport · full-mount
+// π Gateway v2.4.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
 import multer  from 'multer';
 import fs      from 'fs';
 import path    from 'path';
-import { randomUUID, randomBytes } from 'crypto';
+import { randomUUID, randomBytes, createHash } from 'crypto';
 import pg      from 'pg';
 
 const { Pool } = pg;
@@ -15,13 +15,15 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.3.11';
+const GATEWAY_VERSION  = '2.4.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
-const PRIVATE_PI_RE = /^3\.14\d{18}$/;
+const PRIVATE_PI_RE = /^3\.14\d{10}[0-9a-f]{8}$/;
 const PUBLIC_PI_RE  = /^3\.14\d{10}$/;
 const DEFAULT_ADMIN = '3.147185839309';
+
+const oauthCodes = new Map(); // code → { piPrivate, accessKey, challenge, expires, src }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -258,7 +260,7 @@ async function toolSet(piPrivate, args) {
 
     if (private_pi) {
       if (!PRIVATE_PI_RE.test(private_pi)) {
-        return fail("That doesn't look like a valid π number. It should start with 3.14 and be 22 digits long.");
+        return fail("That doesn't look like a valid π number. It should be 22 characters: 3.14 + 10 digits + 8 hex chars.");
       }
       const validated = await pirValidate(private_pi);
       if (!validated?.valid) {
@@ -1253,6 +1255,177 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   return res.json({ ok: true });
 });
 
+// ── OAuth 2.0 Authorization Server ───────────────────────────────────────────
+
+const oauthCard = (title, body) => `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#fff;border-radius:10px;padding:2rem;max-width:380px;width:100%;box-shadow:0 2px 16px rgba(0,0,0,.1)}
+h1{font-size:1.15rem;margin:0 0 .3rem;color:#111}
+p{color:#666;font-size:.85rem;margin:0 0 1.2rem;line-height:1.5}
+label{display:block;font-size:.78rem;font-weight:600;color:#444;margin-bottom:.25rem;margin-top:.9rem}
+label:first-of-type{margin-top:0}
+.opt{font-weight:400;color:#999}
+input{width:100%;padding:.5rem .75rem;border:1px solid #ddd;border-radius:6px;font-size:.9rem;font-family:monospace}
+input:focus{outline:none;border-color:#015284;box-shadow:0 0 0 2px rgba(1,82,132,.15)}
+button,a.btn{display:block;width:100%;margin-top:1.25rem;padding:.65rem;background:#015284;color:#fff;border:none;border-radius:6px;font-size:.9rem;font-weight:600;cursor:pointer;text-decoration:none;text-align:center}
+button:hover,a.btn:hover{background:#013d63}
+.err{color:#c00;font-size:.85rem;margin:.75rem 0 0}
+.key-box{font-family:monospace;font-size:.85rem;background:#f0f4f8;border:1px solid #d0dbe8;border-radius:6px;padding:.75rem 1rem;word-break:break-all;color:#015284;margin:.5rem 0 .75rem;cursor:pointer;user-select:all}
+.warn{color:#b45;font-size:.8rem;font-weight:600;margin:0 0 1.25rem}
+</style></head>
+<body><div class="card">${body}</div></body></html>`;
+
+const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+
+app.get(`${PREFIX}/.well-known/oauth-authorization-server`, (req, res) => {
+  const base = selfUrl();
+  res.json({
+    issuer:                                base,
+    authorization_endpoint:                `${base}/authorize`,
+    token_endpoint:                        `${base}/token`,
+    registration_endpoint:                 `${base}/register`,
+    response_types_supported:              ['code'],
+    grant_types_supported:                 ['authorization_code'],
+    code_challenge_methods_supported:      ['S256'],
+    token_endpoint_auth_methods_supported: ['none'],
+  });
+});
+
+app.post(`${PREFIX}/register`, express.json(), (req, res) => {
+  res.status(201).json({
+    client_id:                  randomUUID(),
+    client_id_issued_at:        Math.floor(Date.now() / 1000),
+    redirect_uris:              req.body?.redirect_uris ?? [],
+    grant_types:                ['authorization_code'],
+    response_types:             ['code'],
+    token_endpoint_auth_method: 'none',
+  });
+});
+
+app.get(`${PREFIX}/authorize`, (req, res) => {
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
+  if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
+
+  // Direct path: client_id is a valid private pi (Advanced Settings — skip form)
+  if (client_id && PRIVATE_PI_RE.test(String(client_id).trim())) {
+    const code = randomUUID();
+    oauthCodes.set(code, { piPrivate: String(client_id).trim(), accessKey: null, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000, src: 'direct' });
+    const url = new URL(String(redirect_uri));
+    url.searchParams.set('code', code);
+    if (state) url.searchParams.set('state', String(state));
+    return res.redirect(url.toString());
+  }
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(oauthCard('Connect to π', `
+<h1>Connect to π</h1>
+<p>Enter your nickname and π private key. New here? Leave the key blank — we'll create your pair.</p>
+<form method="POST">
+<input type="hidden" name="redirect_uri"          value="${esc(redirect_uri)}">
+<input type="hidden" name="state"                 value="${esc(state)}">
+<input type="hidden" name="code_challenge"        value="${esc(code_challenge)}">
+<input type="hidden" name="code_challenge_method" value="${esc(code_challenge_method)}">
+<label>Nickname</label>
+<input type="text"     name="nick"       placeholder="your name or handle" autocomplete="username" required>
+<label>π private key <span class="opt">(leave blank if you're new)</span></label>
+<input type="password" name="pi_key"     placeholder="3.14…"               autocomplete="current-password">
+<label>Access key <span class="opt">(only for secured pairs)</span></label>
+<input type="password" name="access_key" placeholder="Leave blank if none" autocomplete="off">
+<button type="submit">Connect</button>
+</form>`));
+});
+
+app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
+  const { nick, pi_key, access_key, redirect_uri, state, code_challenge } = req.body ?? {};
+  if (!nick || !redirect_uri) return res.status(400).send('Missing required fields');
+
+  const piKey = pi_key?.trim() || null;
+  const ak    = access_key?.trim() || null;
+
+  const errPage = msg => res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8').send(
+    oauthCard('Error — π', `<h1>Connect to π</h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#015284">← Back</a>`)
+  );
+
+  if (piKey) {
+    // Existing user: validate pi_key against PIR
+    if (!PRIVATE_PI_RE.test(piKey)) return errPage("That doesn't look like a valid π key.");
+    const validated = await pirValidate(piKey);
+    if (!validated?.valid) return errPage('Invalid π key. Double-check it or leave blank to create a new pair.');
+    const code = randomUUID();
+    oauthCodes.set(code, { piPrivate: piKey, accessKey: ak, challenge: code_challenge, expires: Date.now() + 5 * 60_000, src: 'form' });
+    const url = new URL(redirect_uri);
+    url.searchParams.set('code', code);
+    if (state) url.searchParams.set('state', state);
+    return res.redirect(url.toString());
+  }
+
+  // New user: auto-provision via PIR
+  const reg = await fetch(`${PIR}/id`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ nick_operator: nick.trim() }),
+  }).catch(() => null);
+  if (!reg?.ok) {
+    const err = reg ? (await reg.json().catch(() => ({}))).error : 'Network error';
+    return errPage(err ?? 'Could not create your pair — try again.');
+  }
+  const { private_pi, public_pi } = await reg.json();
+
+  const code = randomUUID();
+  oauthCodes.set(code, { piPrivate: private_pi, accessKey: null, challenge: code_challenge, expires: Date.now() + 10 * 60_000, src: 'form' });
+
+  const continueUrl = new URL(redirect_uri);
+  continueUrl.searchParams.set('code', code);
+  if (state) continueUrl.searchParams.set('state', state);
+
+  const pk = esc(private_pi);
+  const continueHref = esc(continueUrl.toString());
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(oauthCard('Your π key — save it now', `
+<h1>Your pair is ready</h1>
+<p>Welcome, <strong>${esc(nick.trim())}</strong>. Your π address: <strong>${esc(public_pi)}</strong></p>
+<p>Save your private key — it will <strong>not</strong> be shown again.</p>
+<div class="key-box" id="pk" title="Click to copy">${pk}</div>
+<p class="warn">⚠ Copy and store this before continuing.</p>
+<a class="btn" href="${continueHref}">I've saved my key → Continue</a>
+<script>document.getElementById('pk').addEventListener('click',()=>{navigator.clipboard?.writeText(${JSON.stringify(private_pi)}).then(()=>{var el=document.getElementById('pk');el.style.background='#e8f5e9';el.title='Copied!'})});</script>`));
+});
+
+app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
+  const { grant_type, code, code_verifier, client_secret } = req.body ?? {};
+  if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
+
+  const entry = oauthCodes.get(code);
+  if (!entry || Date.now() > entry.expires) { oauthCodes.delete(code); return res.status(400).json({ error: 'invalid_grant' }); }
+
+  const expected = createHash('sha256').update(code_verifier ?? '').digest('base64url');
+  if (expected !== entry.challenge) { oauthCodes.delete(code); return res.status(400).json({ error: 'invalid_grant' }); }
+  oauthCodes.delete(code);
+
+  // Direct path: validate at token time (client_secret = access_key for secured pairs)
+  if (entry.src === 'direct') {
+    let secret = client_secret?.trim() || null;
+    if (!secret) {
+      const basic = req.headers['authorization'] ?? '';
+      if (basic.startsWith('Basic ')) {
+        const decoded = Buffer.from(basic.slice(6), 'base64').toString();
+        const sep = decoded.indexOf(':');
+        if (sep !== -1) secret = decoded.slice(sep + 1).trim() || null;
+      }
+    }
+    const validated = await pirValidate(entry.piPrivate);
+    if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
+    entry.accessKey = secret;
+  }
+
+  const token = entry.accessKey ? `${entry.piPrivate}|${entry.accessKey}` : entry.piPrivate;
+  res.json({ access_token: token, token_type: 'Bearer', expires_in: 7 * 24 * 3600 });
+});
+
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
 
 app.get(`${PREFIX}/mcp`, (req, res) => {
@@ -1346,9 +1519,17 @@ ${Object.entries(data.setup.config_locations).map(([a, paths]) =>
 });
 
 app.post(`${PREFIX}/mcp`, async (req, res) => {
-  const piPrivate = req.headers['x-pi-private'] ?? null;
-  const body      = req.body;
+  let piPrivate = req.headers['x-pi-private'] ?? null;
+  if (!piPrivate) {
+    const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
+      ? req.headers['authorization'].slice(7) : null;
+    if (bearer) piPrivate = bearer.split('|')[0].trim() || null;
+  }
+  const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
+  if (!piPrivate && body.method !== 'initialize' && !body.method?.startsWith('notifications/')) {
+    return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
+  }
   return res.json(await handleJsonRpc(piPrivate, body));
 });
 
@@ -1374,9 +1555,17 @@ app.get(`${PREFIX}/sse`, (req, res) => {
 });
 
 app.post(`${PREFIX}/messages`, async (req, res) => {
-  const piPrivate = req.headers['x-pi-private'] ?? null;
-  const body      = req.body;
+  let piPrivate = req.headers['x-pi-private'] ?? null;
+  if (!piPrivate) {
+    const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
+      ? req.headers['authorization'].slice(7) : null;
+    if (bearer) piPrivate = bearer.split('|')[0].trim() || null;
+  }
+  const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
+  if (!piPrivate && body.method !== 'initialize' && !body.method?.startsWith('notifications/')) {
+    return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
+  }
   return res.json(await handleJsonRpc(piPrivate, body));
 });
 
