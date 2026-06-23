@@ -1283,6 +1283,9 @@ button:hover,a.btn:hover{background:#7EAB85}
 .copy-btn{flex-shrink:0;background:transparent;border:1px solid rgba(107,143,113,0.30);border-radius:2px;color:#6B8F71;font-size:.68rem;font-weight:600;letter-spacing:.04em;cursor:pointer;padding:.2rem .5rem;transition:color .15s,border-color .15s;width:auto;margin:0}
 .copy-btn:hover{color:#7EAB85;border-color:rgba(107,143,113,0.55)}
 .share-note{color:rgba(255,255,255,0.25);font-size:.75rem;margin:.35rem 0 0;line-height:1.4}
+.cd-text{color:rgba(255,255,255,0.35);font-size:.82rem;margin-top:1.2rem;text-align:center}
+.cd-link{color:#7EAB85;cursor:pointer;text-decoration:none}
+.cd-link:hover{color:#6B8F71}
 .warn{color:rgba(255,200,100,0.65);font-size:.76rem;font-weight:600;margin:0 0 1.4rem}
 </style></head>
 <body><div class="wrap">${body}</div></body></html>`;
@@ -1414,7 +1417,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
   <button class="copy-btn" onclick="doCopy('pk','pk-wrap')">copy</button>
 </div>
 <p class="warn">⚠ Not shown again — save before continuing.</p>
-<a class="btn" href="${continueHref}">I've saved my id → Continue</a>
+<p class="cd-text">Continuing in <strong id="ct">30</strong>s — or <a class="cd-link" onclick="go()">go now</a></p>
 <script>
 function doCopy(id,wrapId){
   var txt=document.getElementById(id).textContent;
@@ -1424,6 +1427,12 @@ function doCopy(id,wrapId){
     setTimeout(function(){btn.textContent=prev;},2000);
   });
 }
+var _href=${JSON.stringify(continueUrl.toString())};
+function go(){window.location.href=_href;}
+var t=30,tick=setInterval(function(){
+  t--;document.getElementById('ct').textContent=t;
+  if(t<=0){clearInterval(tick);go();}
+},1000);
 </script>`));
 });
 
