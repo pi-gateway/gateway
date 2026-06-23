@@ -1342,7 +1342,7 @@ app.get(`${PREFIX}/authorize`, (req, res) => {
 </form>
 <script>
 document.getElementById('op').placeholder='what people call you';
-document.getElementById('ag').placeholder='what you call your agent — if nobody’s looking';
+document.getElementById('ag').placeholder='what you call your agent — if nobody’s listening';
 document.getElementById('pikey').placeholder="I'm new here";
 </script>`));
 });
