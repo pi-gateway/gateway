@@ -1270,9 +1270,6 @@ p{color:rgba(255,255,255,0.35);font-size:.82rem;margin-bottom:1.6rem;line-height
 .label-row{display:flex;align-items:center;gap:5px;margin-top:1.1rem;margin-bottom:.3rem}
 label{font-size:.68rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:rgba(255,255,255,0.35)}
 .opt{font-weight:400;color:rgba(255,255,255,0.20);font-size:.68rem;text-transform:none;letter-spacing:0}
-.tip{position:relative;cursor:help;color:#6B8F71;font-size:.75rem;line-height:1;flex-shrink:0}
-.tip::after{content:attr(data-tip);position:absolute;bottom:130%;left:50%;transform:translateX(-50%);background:#2A2A26;color:rgba(255,255,255,0.78);font-size:.70rem;font-weight:400;letter-spacing:0;text-transform:none;padding:.35rem .6rem;border-radius:4px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .18s;border:1px solid rgba(255,255,255,0.10);z-index:10}
-.tip:hover::after{opacity:1}
 input{width:100%;padding:.55rem .75rem;background:transparent;border:none;border-bottom:1px solid rgba(107,143,113,0.25);font-size:.9rem;font-family:monospace;color:rgba(255,255,255,0.80);outline:none;transition:border-color .15s;border-radius:0}
 input::placeholder{color:rgba(255,255,255,0.18);font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;font-style:italic}
 input:focus{border-bottom-color:#7EAB85}
@@ -1335,16 +1332,16 @@ app.get(`${PREFIX}/authorize`, (req, res) => {
 <input type="hidden" name="state"                 value="${esc(state)}">
 <input type="hidden" name="code_challenge"        value="${esc(code_challenge)}">
 <input type="hidden" name="code_challenge_method" value="${esc(code_challenge_method)}">
-<div class="label-row"><label>Operator nickname</label><span class="tip" data-tip="Leave blank if registering an agentic agent">ⓘ</span></div>
+<div class="label-row"><label>Operator nickname</label><span class="opt">leave blank if registering an agentic agent</span></div>
 <input id="op" type="text"     name="nick_operator" autocomplete="off">
-<div class="label-row"><label>Agent nickname</label><span class="tip" data-tip="Optional when the agent isn't agentic">ⓘ</span></div>
+<div class="label-row"><label>Agent nickname</label><span class="opt">optional when agent isn't agentic</span></div>
 <input id="ag" type="text"     name="nick_agent"    autocomplete="off">
 <div class="label-row"><label>π private id</label><span class="opt">leave blank if you're new</span></div>
 <input type="text" name="pi_key" id="pikey" autocomplete="off">
 <button type="submit">Connect</button>
 </form>
 <script>
-const ops=['ada lovelace','grace hopper','alan turing','margaret hamilton','katherine johnson','richard feynman','nikola tesla','linus torvalds','emmy noether','claude shannon'];
+const ops=['lovelace','hopper','turing','hamilton','johnson','feynman','tesla','shannon','darwin','curie','linus','gauss'];
 const ags=['oracle','sage','archie','sherlock','compass','newton','euclid','pascal','fibonacci','wren','meridian','copernicus','kepler','leibniz'];
 const pick=a=>a[Math.floor(Math.random()*a.length)];
 document.getElementById('op').placeholder=pick(ops);
