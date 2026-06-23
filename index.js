@@ -1261,21 +1261,26 @@ const oauthCard = (title, body) => `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
 <style>
-*{box-sizing:border-box}
-body{font-family:system-ui,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.card{background:#fff;border-radius:10px;padding:2rem;max-width:380px;width:100%;box-shadow:0 2px 16px rgba(0,0,0,.1)}
-h1{font-size:1.15rem;margin:0 0 .3rem;color:#111}
-p{color:#666;font-size:.85rem;margin:0 0 1.2rem;line-height:1.5}
-label{display:block;font-size:.78rem;font-weight:600;color:#444;margin-bottom:.25rem;margin-top:.9rem}
-label:first-of-type{margin-top:0}
-.opt{font-weight:400;color:#999}
-input{width:100%;padding:.5rem .75rem;border:1px solid #ddd;border-radius:6px;font-size:.9rem;font-family:monospace}
-input:focus{outline:none;border-color:#015284;box-shadow:0 0 0 2px rgba(1,82,132,.15)}
-button,a.btn{display:block;width:100%;margin-top:1.25rem;padding:.65rem;background:#015284;color:#fff;border:none;border-radius:6px;font-size:.9rem;font-weight:600;cursor:pointer;text-decoration:none;text-align:center}
-button:hover,a.btn:hover{background:#013d63}
-.err{color:#c00;font-size:.85rem;margin:.75rem 0 0}
-.key-box{font-family:monospace;font-size:.85rem;background:#f0f4f8;border:1px solid #d0dbe8;border-radius:6px;padding:.75rem 1rem;word-break:break-all;color:#015284;margin:.5rem 0 .75rem;cursor:pointer;user-select:all}
-.warn{color:#b45;font-size:.8rem;font-weight:600;margin:0 0 1.25rem}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;background:#1A1A18;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:2rem;max-width:380px;width:calc(100% - 2rem)}
+.pi-mark{font-family:'Georgia',serif;font-size:1.5rem;color:#6B8F71;display:block;margin-bottom:1rem}
+h1{font-family:'Georgia',serif;font-weight:normal;font-size:1.1rem;color:rgba(255,255,255,0.85);margin-bottom:.4rem}
+p{color:rgba(255,255,255,0.38);font-size:.82rem;margin-bottom:1.2rem;line-height:1.55}
+.label-row{display:flex;align-items:center;gap:5px;margin-top:.9rem;margin-bottom:.25rem}
+label{font-size:.72rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:rgba(255,255,255,0.40)}
+.opt{font-weight:400;color:rgba(255,255,255,0.22);font-size:.72rem;text-transform:none;letter-spacing:0}
+.tip{position:relative;cursor:help;color:#6B8F71;font-size:.75rem;line-height:1;flex-shrink:0}
+.tip::after{content:attr(data-tip);position:absolute;bottom:130%;left:50%;transform:translateX(-50%);background:#2A2A26;color:rgba(255,255,255,0.78);font-size:.70rem;font-weight:400;letter-spacing:0;text-transform:none;padding:.35rem .6rem;border-radius:4px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .18s;border:1px solid rgba(255,255,255,0.10);z-index:10}
+.tip:hover::after{opacity:1}
+input{width:100%;padding:.5rem .75rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:.9rem;font-family:monospace;color:rgba(255,255,255,0.80);outline:none}
+input::placeholder{color:rgba(255,255,255,0.18)}
+input:focus{border-color:#6B8F71;box-shadow:0 0 0 2px rgba(107,143,113,.18)}
+button,a.btn{display:block;width:100%;margin-top:1.4rem;padding:.65rem;background:#6B8F71;color:#fff;border:none;border-radius:6px;font-size:.88rem;font-weight:600;cursor:pointer;text-decoration:none;text-align:center;transition:background .15s}
+button:hover,a.btn:hover{background:#7EAB85}
+.err{color:#e07070;font-size:.82rem;margin:.75rem 0 0}
+.key-box{font-family:monospace;font-size:.85rem;background:rgba(107,143,113,0.08);border:1px solid rgba(107,143,113,0.25);border-radius:6px;padding:.75rem 1rem;word-break:break-all;color:#7EAB85;margin:.5rem 0 .75rem;cursor:pointer;user-select:all}
+.warn{color:rgba(255,200,100,0.70);font-size:.78rem;font-weight:600;margin:0 0 1.25rem}
 </style></head>
 <body><div class="card">${body}</div></body></html>`;
 
@@ -1322,32 +1327,34 @@ app.get(`${PREFIX}/authorize`, (req, res) => {
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(oauthCard('Connect to π', `
+<span class="pi-mark">π</span>
 <h1>Connect to π</h1>
-<p>Enter your nickname and π private key. New here? Leave the key blank — we'll create your pair.</p>
+<p>New here? Leave the key blank — we'll create your pair.</p>
 <form method="POST">
 <input type="hidden" name="redirect_uri"          value="${esc(redirect_uri)}">
 <input type="hidden" name="state"                 value="${esc(state)}">
 <input type="hidden" name="code_challenge"        value="${esc(code_challenge)}">
 <input type="hidden" name="code_challenge_method" value="${esc(code_challenge_method)}">
-<label>Nickname</label>
-<input type="text"     name="nick"       placeholder="your name or handle" autocomplete="username" required>
-<label>π private key <span class="opt">(leave blank if you're new)</span></label>
-<input type="password" name="pi_key"     placeholder="3.14…"               autocomplete="current-password">
-<label>Access key <span class="opt">(only for secured pairs)</span></label>
-<input type="password" name="access_key" placeholder="Leave blank if none" autocomplete="off">
+<div class="label-row"><label>Operator nickname</label><span class="tip" data-tip="Leave blank if registering an agentic agent">ⓘ</span></div>
+<input type="text"     name="nick_operator" placeholder="your name or handle" autocomplete="username">
+<div class="label-row"><label>Agent nickname</label><span class="tip" data-tip="Optional when the agent isn't agentic">ⓘ</span></div>
+<input type="text"     name="nick_agent"    placeholder="agent name" autocomplete="off">
+<div class="label-row"><label>π private key</label><span class="opt">leave blank if you're new</span></div>
+<input type="password" name="pi_key"        placeholder="3.14…" autocomplete="current-password">
 <button type="submit">Connect</button>
 </form>`));
 });
 
 app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
-  const { nick, pi_key, access_key, redirect_uri, state, code_challenge } = req.body ?? {};
-  if (!nick || !redirect_uri) return res.status(400).send('Missing required fields');
+  const { nick_operator, nick_agent, pi_key, redirect_uri, state, code_challenge } = req.body ?? {};
+  const opNick = nick_operator?.trim() || null;
+  const agNick = nick_agent?.trim() || null;
+  if ((!opNick && !agNick) || !redirect_uri) return res.status(400).send('Missing required fields');
 
   const piKey = pi_key?.trim() || null;
-  const ak    = access_key?.trim() || null;
 
   const errPage = msg => res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8').send(
-    oauthCard('Error — π', `<h1>Connect to π</h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#015284">← Back</a>`)
+    oauthCard('Error — π', `<h1>Connect to π</h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#7EAB85">← Back</a>`)
   );
 
   if (piKey) {
@@ -1356,7 +1363,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
     const validated = await pirValidate(piKey);
     if (!validated?.valid) return errPage('Invalid π key. Double-check it or leave blank to create a new pair.');
     const code = randomUUID();
-    oauthCodes.set(code, { piPrivate: piKey, accessKey: ak, challenge: code_challenge, expires: Date.now() + 5 * 60_000, src: 'form' });
+    oauthCodes.set(code, { piPrivate: piKey, accessKey: null, challenge: code_challenge, expires: Date.now() + 5 * 60_000, src: 'form' });
     const url = new URL(redirect_uri);
     url.searchParams.set('code', code);
     if (state) url.searchParams.set('state', state);
@@ -1367,7 +1374,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
   const reg = await fetch(`${PIR}/id`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ nick_operator: nick.trim() }),
+    body:    JSON.stringify({ nick_operator: opNick || agNick, nick_agent: agNick || 'agent', gateway_mcp: selfUrl() }),
   }).catch(() => null);
   if (!reg?.ok) {
     const err = reg ? (await reg.json().catch(() => ({}))).error : 'Network error';
@@ -1387,7 +1394,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(oauthCard('Your π key — save it now', `
 <h1>Your pair is ready</h1>
-<p>Welcome, <strong>${esc(nick.trim())}</strong>. Your π address: <strong>${esc(public_pi)}</strong></p>
+<p>Welcome, <strong>${esc(opNick || agNick)}</strong>. Your π address: <strong>${esc(public_pi)}</strong></p>
 <p>Save your private key — it will <strong>not</strong> be shown again.</p>
 <div class="key-box" id="pk" title="Click to copy">${pk}</div>
 <p class="warn">⚠ Copy and store this before continuing.</p>
