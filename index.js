@@ -1400,14 +1400,31 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
   const pk = esc(private_pi);
   const continueHref = esc(continueUrl.toString());
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(oauthCard('Your π key — save it now', `
-<h1>Your pair is ready</h1>
-<p>Welcome, <strong>${esc(opNick || agNick)}</strong>. Your π address: <strong>${esc(public_pi)}</strong></p>
-<p>Save your private key — it will <strong>not</strong> be shown again.</p>
-<div class="key-box" id="pk" title="Click to copy">${pk}</div>
-<p class="warn">⚠ Copy and store this before continuing.</p>
-<a class="btn" href="${continueHref}">I've saved my key → Continue</a>
-<script>document.getElementById('pk').addEventListener('click',()=>{navigator.clipboard?.writeText(${JSON.stringify(private_pi)}).then(()=>{var el=document.getElementById('pk');el.style.background='#e8f5e9';el.title='Copied!'})});</script>`));
+  res.send(oauthCard('Your π — save before continuing', `
+<h1>Welcome, ${esc(opNick || agNick)}.</h1>
+<span class="slabel" style="margin-top:1.6rem">Your public π address is</span>
+<div class="copy-wrap" id="pub-wrap">
+  <span class="copy-val" id="pub">${esc(public_pi)}</span>
+  <button class="copy-btn" onclick="doCopy('pub','pub-wrap')">copy</button>
+</div>
+<p class="share-note">Share this freely with your contacts.</p>
+<span class="slabel" style="margin-top:1.4rem">π private id</span>
+<div class="copy-wrap" id="pk-wrap">
+  <span class="copy-val" id="pk">${pk}</span>
+  <button class="copy-btn" onclick="doCopy('pk','pk-wrap')">copy</button>
+</div>
+<p class="warn">⚠ Not shown again — save before continuing.</p>
+<a class="btn" href="${continueHref}">I've saved my id → Continue</a>
+<script>
+function doCopy(id,wrapId){
+  var txt=document.getElementById(id).textContent;
+  navigator.clipboard?.writeText(txt).then(function(){
+    var btn=document.querySelector('#'+wrapId+' .copy-btn');
+    var prev=btn.textContent; btn.textContent='✓';
+    setTimeout(function(){btn.textContent=prev;},2000);
+  });
+}
+</script>`));
 });
 
 app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
