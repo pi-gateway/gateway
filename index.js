@@ -1262,27 +1262,27 @@ const oauthCard = (title, body) => `<!DOCTYPE html>
 <title>${title}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;background:#1A1A18;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:2rem;max-width:380px;width:calc(100% - 2rem)}
-.pi-mark{font-family:'Georgia',serif;font-size:1.5rem;color:#6B8F71;display:block;margin-bottom:1rem}
+body{font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;background:#1A1A18;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
+.wrap{max-width:340px;width:100%}
+.pi-mark{font-family:'Georgia',serif;font-size:1.5rem;color:#6B8F71;display:block;margin-bottom:2rem}
 h1{font-family:'Georgia',serif;font-weight:normal;font-size:1.1rem;color:rgba(255,255,255,0.85);margin-bottom:.4rem}
-p{color:rgba(255,255,255,0.38);font-size:.82rem;margin-bottom:1.2rem;line-height:1.55}
-.label-row{display:flex;align-items:center;gap:5px;margin-top:.9rem;margin-bottom:.25rem}
-label{font-size:.72rem;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:rgba(255,255,255,0.40)}
-.opt{font-weight:400;color:rgba(255,255,255,0.22);font-size:.72rem;text-transform:none;letter-spacing:0}
+p{color:rgba(255,255,255,0.35);font-size:.82rem;margin-bottom:1.6rem;line-height:1.55}
+.label-row{display:flex;align-items:center;gap:5px;margin-top:1.1rem;margin-bottom:.3rem}
+label{font-size:.68rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:rgba(255,255,255,0.35)}
+.opt{font-weight:400;color:rgba(255,255,255,0.20);font-size:.68rem;text-transform:none;letter-spacing:0}
 .tip{position:relative;cursor:help;color:#6B8F71;font-size:.75rem;line-height:1;flex-shrink:0}
 .tip::after{content:attr(data-tip);position:absolute;bottom:130%;left:50%;transform:translateX(-50%);background:#2A2A26;color:rgba(255,255,255,0.78);font-size:.70rem;font-weight:400;letter-spacing:0;text-transform:none;padding:.35rem .6rem;border-radius:4px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .18s;border:1px solid rgba(255,255,255,0.10);z-index:10}
 .tip:hover::after{opacity:1}
-input{width:100%;padding:.5rem .75rem;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.10);border-radius:6px;font-size:.9rem;font-family:monospace;color:rgba(255,255,255,0.80);outline:none}
-input::placeholder{color:rgba(255,255,255,0.18)}
-input:focus{border-color:#6B8F71;box-shadow:0 0 0 2px rgba(107,143,113,.18)}
-button,a.btn{display:block;width:100%;margin-top:1.4rem;padding:.65rem;background:#6B8F71;color:#fff;border:none;border-radius:6px;font-size:.88rem;font-weight:600;cursor:pointer;text-decoration:none;text-align:center;transition:background .15s}
+input{width:100%;padding:.55rem .75rem;background:transparent;border:none;border-bottom:1px solid rgba(107,143,113,0.25);font-size:.9rem;font-family:monospace;color:rgba(255,255,255,0.80);outline:none;transition:border-color .15s;border-radius:0}
+input::placeholder{color:rgba(255,255,255,0.18);font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;font-style:italic}
+input:focus{border-bottom-color:#7EAB85}
+button,a.btn{display:block;width:100%;margin-top:2rem;padding:.65rem;background:#6B8F71;color:#fff;border:none;border-radius:3px;font-size:.85rem;font-weight:600;cursor:pointer;text-decoration:none;text-align:center;letter-spacing:.04em;transition:background .15s}
 button:hover,a.btn:hover{background:#7EAB85}
 .err{color:#e07070;font-size:.82rem;margin:.75rem 0 0}
-.key-box{font-family:monospace;font-size:.85rem;background:rgba(107,143,113,0.08);border:1px solid rgba(107,143,113,0.25);border-radius:6px;padding:.75rem 1rem;word-break:break-all;color:#7EAB85;margin:.5rem 0 .75rem;cursor:pointer;user-select:all}
-.warn{color:rgba(255,200,100,0.70);font-size:.78rem;font-weight:600;margin:0 0 1.25rem}
+.key-box{font-family:monospace;font-size:.88rem;background:rgba(107,143,113,0.07);border:1px solid rgba(107,143,113,0.22);border-radius:3px;padding:.85rem 1rem;word-break:break-all;color:#7EAB85;margin:.5rem 0 .75rem;cursor:pointer;user-select:all;line-height:1.5}
+.warn{color:rgba(255,200,100,0.65);font-size:.76rem;font-weight:600;margin:0 0 1.4rem}
 </style></head>
-<body><div class="card">${body}</div></body></html>`;
+<body><div class="wrap">${body}</div></body></html>`;
 
 const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 
@@ -1328,21 +1328,29 @@ app.get(`${PREFIX}/authorize`, (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(oauthCard('Connect to π', `
 <span class="pi-mark">π</span>
-<h1>Connect to π</h1>
-<p>New here? Leave the key blank — we'll create your pair.</p>
-<form method="POST">
+<h1>Connect to <span style="color:#6B8F71;font-family:Georgia,serif">π</span></h1>
+<p>New here? Leave the id blank — we'll create your pair.</p>
+<form method="POST" autocomplete="off">
 <input type="hidden" name="redirect_uri"          value="${esc(redirect_uri)}">
 <input type="hidden" name="state"                 value="${esc(state)}">
 <input type="hidden" name="code_challenge"        value="${esc(code_challenge)}">
 <input type="hidden" name="code_challenge_method" value="${esc(code_challenge_method)}">
 <div class="label-row"><label>Operator nickname</label><span class="tip" data-tip="Leave blank if registering an agentic agent">ⓘ</span></div>
-<input type="text"     name="nick_operator" placeholder="your name or handle" autocomplete="username">
+<input id="op" type="text"     name="nick_operator" autocomplete="off">
 <div class="label-row"><label>Agent nickname</label><span class="tip" data-tip="Optional when the agent isn't agentic">ⓘ</span></div>
-<input type="text"     name="nick_agent"    placeholder="agent name" autocomplete="off">
-<div class="label-row"><label>π private key</label><span class="opt">leave blank if you're new</span></div>
-<input type="password" name="pi_key"        placeholder="3.14…" autocomplete="current-password">
+<input id="ag" type="text"     name="nick_agent"    autocomplete="off">
+<div class="label-row"><label>π private id</label><span class="opt">leave blank if you're new</span></div>
+<input type="text" name="pi_key" id="pikey" autocomplete="off">
 <button type="submit">Connect</button>
-</form>`));
+</form>
+<script>
+const ops=['ada lovelace','grace hopper','alan turing','margaret hamilton','katherine johnson','richard feynman','nikola tesla','linus torvalds','emmy noether','claude shannon'];
+const ags=['oracle','sage','archie','sherlock','compass','newton','euclid','pascal','fibonacci','wren','meridian','copernicus','kepler','leibniz'];
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+document.getElementById('op').placeholder=pick(ops);
+document.getElementById('ag').placeholder=pick(ags);
+document.getElementById('pikey').placeholder='';
+</script>`));
 });
 
 app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
@@ -1354,7 +1362,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
   const piKey = pi_key?.trim() || null;
 
   const errPage = msg => res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8').send(
-    oauthCard('Error — π', `<h1>Connect to π</h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#7EAB85">← Back</a>`)
+    oauthCard('Error — π', `<h1>Connect to <span style="color:#6B8F71;font-family:Georgia,serif">π</span></h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#7EAB85">← Back</a>`)
   );
 
   if (piKey) {
