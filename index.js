@@ -3,6 +3,9 @@
 
 import express from 'express';
 import multer  from 'multer';
+import fs      from 'fs';
+import path    from 'path';
+import { randomUUID, randomBytes } from 'crypto';
 import pg      from 'pg';
 
 const { Pool } = pg;
@@ -246,55 +249,6 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
   }
 }
 
-
-// ── Notifications ─────────────────────────────────────────────────────────────
-
-async function sendNotifications(recipientPi, payload) {
-  if (!recipientPi) return;
-  try {
-    const { rows } = await pool.query(
-      'SELECT behaviors FROM mcp_sessions WHERE public_pi = $1', [recipientPi]
-    );
-    const beh         = rows[0]?.behaviors ?? {};
-    const slackUrl    = beh.notify_slack;
-    const notifyEmail = beh.notify_email;
-    if (!slackUrl && !notifyEmail) return;
-
-    const fromName = payload.from_nick_operator || payload.from_nick_agent || 'Unknown';
-    const preview  = String(payload.content ?? '').replace(/\n/g, ' ').slice(0, 200);
-
-    if (slackUrl) {
-      fetch(slackUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: `New π message from *${fromName}*`,
-          attachments: [{ text: preview, color: '#015284' }],
-        }),
-      }).catch(() => {});
-    }
-
-    const mgKey    = process.env.MAILGUN_API_KEY;
-    const mgDomain = process.env.MAILGUN_DOMAIN;
-    if (notifyEmail && mgKey && mgDomain) {
-      const form = new URLSearchParams({
-        from:    `π <pi@${mgDomain}>`,
-        to:      notifyEmail,
-        subject: `[π] Message from ${fromName}`,
-        text:    `New π message from ${fromName}:\n\n${preview}\n\n— π never resolves, it grows.`,
-      });
-      fetch(`https://api.mailgun.net/v3/${mgDomain}/messages`, {
-        method:  'POST',
-        headers: {
-          Authorization:   `Basic ${Buffer.from(`api:${mgKey}`).toString('base64')}`,
-          'Content-Type':  'application/x-www-form-urlencoded',
-        },
-        body: form.toString(),
-      }).catch(() => {});
-    }
-  } catch { /* fire and forget */ }
-}
-
 // ── Tool: set ─────────────────────────────────────────────────────────────────
 
 async function toolSet(piPrivate, args) {
@@ -355,6 +309,27 @@ async function toolSet(piPrivate, args) {
     });
   }
 
+  // set_access_key: set or remove access key for this pair
+  if (args?.set_access_key !== undefined) {
+    const key = args.set_access_key === true
+      ? randomBytes(20).toString('hex')
+      : (args.set_access_key || null);
+    const r = await fetch(`${PIR}/access-key`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+      body:    JSON.stringify({ access_key: key }),
+    });
+    const data = r.ok ? await r.json() : null;
+    if (!data?.ok) return fail('Could not set access key. Check your π credentials.');
+    if (!key) return ok({ access_key_set: false, note: 'Access key removed. Remove X-Pi-Access-Key from your MCP config headers.' });
+    return ok({
+      access_key_set: true,
+      note: 'Access key set. Add X-Pi-Access-Key to your MCP config headers alongside X-Pi-Private:',
+      header: `X-Pi-Access-Key:${key}`,
+      mcp_args: ['--header', `X-Pi-Access-Key:${key}`],
+    });
+  }
+
   const publicPi = toPublicPi(piPrivate);
 
   // Config updates
@@ -400,18 +375,6 @@ async function toolSet(piPrivate, args) {
      ON CONFLICT (public_pi) DO UPDATE SET ${updateSets}`,
     upsertVals
   );
-
-  if (args.notify !== undefined) {
-    const nb = {};
-    if (args.notify?.slack !== undefined) nb.notify_slack = args.notify.slack ?? null;
-    if (args.notify?.email !== undefined) nb.notify_email = args.notify.email ?? null;
-    if (Object.keys(nb).length) {
-      await pool.query(
-        `UPDATE mcp_sessions SET behaviors = behaviors || $1::jsonb WHERE public_pi = $2`,
-        [JSON.stringify(nb), publicPi]
-      );
-    }
-  }
 
   // Load full session
   const { rows: [session] } = await pool.query(`
@@ -480,7 +443,7 @@ async function toolSet(piPrivate, args) {
     status:   'connected',
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
     spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-    config:   { personality: session?.personality ?? null, behaviors, home_mcp: session?.home_mcp ?? null, notify: { slack: behaviors.notify_slack ?? null, email: behaviors.notify_email ?? null } },
+    config:   { personality: session?.personality ?? null, behaviors, home_mcp: session?.home_mcp ?? null },
     help:     buildHelp(),
   };
 
@@ -777,7 +740,6 @@ async function toolPost(piPrivate, publicPi, args) {
       'SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
     );
     delivered = recipientSession ? true : await deliverToGateway(payload, target);
-    if (recipientSession) void sendNotifications(target.public_pi, payload);
   } else {
     delivered = await deliverToGateway(payload, target);
   }
@@ -903,8 +865,9 @@ const BASE_TOOLS = [
         cc_public_pi:  { type: 'string', description: 'π address to CC on all incoming messages.', nullable: true },
         personality:   { type: 'string', description: 'Agent personality text.', nullable: true },
         behaviors:     { type: 'object', description: 'Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.', nullable: true },
-        home_mcp:      { type: 'string', description: 'Your preferred home MCP URL.', nullable: true },
-        gateway_mcp:   { type: 'string', description: 'Your gateway MCP URL (updated in PIR).', nullable: true },
+        home_mcp:       { type: 'string', description: 'Your preferred home MCP URL.', nullable: true },
+        gateway_mcp:    { type: 'string', description: 'Your gateway MCP URL (updated in PIR).', nullable: true },
+        set_access_key: { description: 'Security key for this pair. When set, connections without it are rejected. Provide a value to set or replace; omit to leave unchanged; clear to remove.', nullable: true },
       },
     },
   },
@@ -1131,7 +1094,6 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
     }
   }
 
-  void sendNotifications(body.to_public_pi, body);
   return res.json({ ok: true });
 });
 
@@ -1224,9 +1186,8 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   const from   = form.from   ?? sender;
   const subject = form.subject ?? '';
   const body    = form['stripped-text'] ?? form['body-plain'] ?? '';
-  const files   = req.files ?? [];
 
-  if (!body && !subject && !files.length) return res.status(400).json({ error: 'empty message' });
+  if (!body && !subject) return res.status(400).json({ error: 'empty message' });
 
   const resolved = await resolveRecipient(nick);
   if (resolved.ambiguous) return res.status(409).json({ error: `Multiple pairs found for "${nick}"` });
@@ -1237,7 +1198,25 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   if (subject) lines.push(`**${subject}**\n`);
   if (from)    lines.push(`From: ${from}\n`);
   if (body)    lines.push(body);
-  if (files.length) lines.push('\n**Attachments:** ' + files.map(f => f.originalname + ' (' + f.mimetype + ', ' + Math.round(f.size/1024) + 'KB)').join(', '));
+
+  const files = (req.files ?? []).filter(f => f.fieldname.startsWith('attachment'));
+  if (files.length) {
+    try {
+      const uploadDir = '/var/www/endandit.nl/uploads';
+      fs.mkdirSync(uploadDir, { recursive: true });
+      const attachLines = ['', '**Attachments:**'];
+      for (const file of files) {
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const filename = `${randomUUID()}-${safeName}`;
+        fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
+        attachLines.push(`- [${file.originalname}](https://endandit.nl/uploads/${filename})`);
+      }
+      lines.push(attachLines.join('\n'));
+    } catch (e) {
+      console.error('[mail] attachment save failed:', e.message);
+    }
+  }
+
   const content = lines.join('\n');
 
   try {
