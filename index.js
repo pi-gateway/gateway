@@ -768,6 +768,20 @@ async function toolEnter(piPrivate, publicPi, args) {
     return ok({ status: 'already_here', note: "You're already connected to this server. Your current tools are all you need." });
   }
 
+  // Toggle-exit: entering an already-connected MCP returns to home
+  const { rows: [cur] } = await pool.query(
+    'SELECT connected_url, home_mcp FROM mcp_sessions WHERE public_pi = $1',
+    [publicPi]
+  );
+  if (cur?.connected_url && cur.connected_url === targetUrl) {
+    await pool.query(
+      'UPDATE mcp_sessions SET connected_url = NULL, connected_name = NULL, connected_tools = NULL WHERE public_pi = $1',
+      [publicPi]
+    );
+    const home = cur.home_mcp ?? myUrl;
+    return ok({ status: 'exited', note: `Disconnected from ${targetName}. Home: ${home}.` });
+  }
+
   try {
     const fetchOpts = body => ({
       method:  'POST',
