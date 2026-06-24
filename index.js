@@ -1,4 +1,4 @@
-// π Gateway v2.7.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
+// π Gateway v2.8.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.7.0';
+const GATEWAY_VERSION  = '2.8.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -1308,10 +1308,10 @@ app.get(`${PREFIX}/authorize`, async (req, res) => {
   const { client_id, redirect_uri, state, code_challenge } = req.query;
   if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
 
-  // Direct path: client_id is a valid private pi (preconfigured in connector)
+  // Direct path: client_id is a valid private pi — access key (client_secret) arrives at /token
   if (client_id && PRIVATE_PI_RE.test(String(client_id).trim())) {
     const code = randomUUID();
-    oauthCodes.set(code, { piPrivate: String(client_id).trim(), challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000 });
+    oauthCodes.set(code, { piPrivate: String(client_id).trim(), challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000, src: 'direct' });
     const url = new URL(String(redirect_uri));
     url.searchParams.set('code', code);
     if (state) url.searchParams.set('state', String(state));
@@ -1353,7 +1353,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
   if (!validated?.valid) return errPage(validated?.error || 'Invalid π key — check it and try again.');
 
   const code = randomUUID();
-  oauthCodes.set(code, { piPrivate: piKey, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000 });
+  oauthCodes.set(code, { piPrivate: piKey, accessKey: accKey, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000 });
 
   const url = new URL(String(redirect_uri));
   url.searchParams.set('code', code);
@@ -1362,7 +1362,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
 });
 
 app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
-  const { grant_type, code, code_verifier } = req.body ?? {};
+  const { grant_type, code, code_verifier, client_secret } = req.body ?? {};
   if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
 
   const entry = oauthCodes.get(code);
@@ -1372,12 +1372,14 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
   if (expected !== entry.challenge) { oauthCodes.delete(code); return res.status(400).json({ error: 'invalid_grant' }); }
   oauthCodes.delete(code);
 
-  if (entry.src === 'direct') {
-    const validated = await pirValidate(entry.piPrivate);
-    if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
-  }
+  // Access key: from client_secret (direct/Advanced Settings path) or from form submission
+  const accessKey = client_secret?.trim() || entry.accessKey || null;
 
-  res.json({ access_token: entry.piPrivate, token_type: 'Bearer', expires_in: 7 * 24 * 3600 });
+  const validated = await pirValidate(entry.piPrivate, accessKey);
+  if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
+
+  const token = accessKey ? `${entry.piPrivate}|${accessKey}` : entry.piPrivate;
+  res.json({ access_token: token, token_type: 'Bearer' });
 });
 
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
