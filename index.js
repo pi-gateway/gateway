@@ -938,7 +938,18 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           session.connected_url === session.home_mcp &&
           FOUR_VERBS.every(n => savedTools.some(t => t.name === n));
         if (isFullMount) {
-          tools = savedTools;
+          // Fetch live tools from home MCP so mounted sub-servers (e.g. autobot) are included
+          try {
+            const liveRes = await fetch(session.home_mcp, {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+              body:    JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} }),
+              signal:  AbortSignal.timeout(5000),
+            });
+            tools = liveRes.ok ? ((await liveRes.json())?.result?.tools ?? savedTools) : savedTools;
+          } catch {
+            tools = savedTools;
+          }
         } else {
           tools = [...tools, ...savedTools.map(t => ({
             ...t,
