@@ -1308,7 +1308,7 @@ app.get(`${PREFIX}/authorize`, async (req, res) => {
   const { client_id, redirect_uri, state, code_challenge } = req.query;
   if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
 
-  // Direct path: client_id is a valid private pi — access key (client_secret) arrives at /token
+  // Direct path only — PIs are provisioned manually. client_secret (access key) arrives at /token.
   if (client_id && PRIVATE_PI_RE.test(String(client_id).trim())) {
     const code = randomUUID();
     oauthCodes.set(code, { piPrivate: String(client_id).trim(), challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000, src: 'direct' });
@@ -1318,47 +1318,7 @@ app.get(`${PREFIX}/authorize`, async (req, res) => {
     return res.redirect(url.toString());
   }
 
-  // Form for manual PI entry
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(oauthCard('Connect to π', `
-<span class="pi-mark">π</span>
-<h1>Connect to π</h1>
-<p>Enter your π private key to continue.</p>
-<form method="POST">
-  <input type="hidden" name="redirect_uri" value="${esc(redirect_uri)}">
-  <input type="hidden" name="state" value="${esc(state ?? '')}">
-  <input type="hidden" name="code_challenge" value="${esc(code_challenge ?? '')}">
-  <div class="label-row"><label>π private key</label></div>
-  <input type="password" name="pi_key" placeholder="3.14…" autocomplete="off" required>
-  <div class="label-row"><label>Access key</label><span class="opt">(optional)</span></div>
-  <input type="password" name="access_key" placeholder="" autocomplete="off">
-  <button>Connect</button>
-</form>`));
-});
-
-app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
-  const { pi_key, access_key, redirect_uri, state, code_challenge } = req.body ?? {};
-  if (!pi_key || !redirect_uri) return res.status(400).send('Missing required fields');
-
-  const piKey  = pi_key.trim();
-  const accKey = access_key?.trim() || null;
-
-  const errPage = msg => res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8').send(
-    oauthCard('Error — π', `<span class="pi-mark">π</span><h1>Connect to π</h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#7EAB85">← Back</a>`)
-  );
-
-  if (!PRIVATE_PI_RE.test(piKey)) return errPage("That doesn't look like a valid π key. Check it and try again.");
-
-  const validated = await pirValidate(piKey, accKey);
-  if (!validated?.valid) return errPage(validated?.error || 'Invalid π key — check it and try again.');
-
-  const code = randomUUID();
-  oauthCodes.set(code, { piPrivate: piKey, accessKey: accKey, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000 });
-
-  const url = new URL(String(redirect_uri));
-  url.searchParams.set('code', code);
-  if (state) url.searchParams.set('state', String(state));
-  return res.redirect(url.toString());
+  return res.status(401).send('Access to π is by invitation. Visit pitr.network to get in touch.');
 });
 
 app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
