@@ -1,4 +1,4 @@
-// π Gateway v2.4.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
+// π Gateway v2.7.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,15 +15,15 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.4.0';
+const GATEWAY_VERSION  = '2.7.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
-const PRIVATE_PI_RE = /^3\.14\d{10}[0-9a-f]{8}$/;
+const PRIVATE_PI_RE = /^3\.14\d{18}$/;
 const PUBLIC_PI_RE  = /^3\.14\d{10}$/;
 const DEFAULT_ADMIN = '3.147185839309';
 
-const oauthCodes = new Map(); // code → { piPrivate, accessKey, challenge, expires, src }
+const oauthCodes = new Map(); // code → { piPrivate, challenge, expires, src }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -52,8 +52,7 @@ function fail(msg, detail) {
 function noIdentity() {
   return ok({
     status:  'no_identity',
-    message: "No pair found. Call set to commission yours — takes 30 seconds. Then you're on the network.",
-    next:    'set({ nick_operator: "YourName", nick_agent: "AgentName" })',
+    message: "No pair found. Visit pitr.network to get in touch — we'll commission your pair and send you the config.",
   });
 }
 
@@ -66,10 +65,13 @@ function inferContentType(content) {
 
 // ── PIR ───────────────────────────────────────────────────────────────────────
 
-async function pirValidate(piPrivate) {
+async function pirValidate(piPrivate, accessKey) {
+  const body = {};
+  if (accessKey) body.access_key = accessKey;
   const r = await fetch(`${PIR}/validate`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+    body:    JSON.stringify(body),
   });
   return r.ok ? r.json() : null;
 }
@@ -253,24 +255,23 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
 
 // ── Tool: set ─────────────────────────────────────────────────────────────────
 
-async function toolSet(piPrivate, args) {
-  // Commission flow — no identity
+async function toolSet(piPrivate, args, accessKey) {
   if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
-    const { nick_operator, nick_agent, private_pi } = args;
+    const { private_pi } = args;
 
     if (private_pi) {
       if (!PRIVATE_PI_RE.test(private_pi)) {
-        return fail("That doesn't look like a valid π number. It should be 22 characters: 3.14 + 10 digits + 8 hex chars.");
+        return fail("That doesn't look like a valid π number. Private π numbers are 22 characters: 3.14 followed by 18 digits.");
       }
       const validated = await pirValidate(private_pi);
       if (!validated?.valid) {
-        return fail('π number not found. Double-check it — or call set({ nick_operator: "YourName", nick_agent: "AgentName" }) to create a new pair.');
+        return fail('π number not found. Double-check it, or visit pitr.network to get started.');
       }
       return ok({
         status:    'reconnect',
         pair:      `${validated.nick_agent} (${validated.nick_operator})`,
         public_pi: validated.public_pi,
-        next_step: "Add your private π as the X-Pi-Private header in your MCP config, then restart your AI assistant and call set. You'll boot straight into your existing pair.",
+        next_step: "Add your private π as the X-Pi-Private header in your MCP config, then restart your AI assistant.",
         config_example: {
           mcpServers: {
             pi: {
@@ -282,53 +283,25 @@ async function toolSet(piPrivate, args) {
       });
     }
 
-    if (!nick_operator) {
-      return ok({
-        status:  'commission',
-        step:    1,
-        message: 'Welcome to π. Do you have an existing π number?',
-        prompt:  [
-          "If yes: set({ private_pi: \"3.14...\" }) — I'll walk you through reconnecting.",
-          "If no: set({ nick_operator: \"YourName\", nick_agent: \"AgentName\" }) — I'll create your pair.",
-        ],
-      });
-    }
-
-    const reg = await pirPid({ nick_operator, nick_agent: nick_agent || 'agent', gateway_mcp: selfUrl() });
-    if (!reg.ok) {
-      return reg.status === 409
-        ? fail('That nickname is already taken. Try a different nick_operator or nick_agent.')
-        : fail('Could not register your pair. Try again.', reg.data);
-    }
-
-    return ok({
-      status:           'commissioned',
-      pair:             `${reg.data.nick_operator} + ${reg.data.nick_agent}`,
-      public_pi:        reg.data.public_pi,
-      private_pi:       reg.data.private_pi,
-      _important:       'Store your private_pi now — it will not be shown again.',
-      boot_instruction: "Add private_pi as the X-Pi-Private header in your MCP config, then call set on every session start. That's it — you're on the network.",
-    });
+    return noIdentity();
   }
 
-  // set_access_key: set or remove access key for this pair
+  // set_access_key: set or remove access key for this pair — PIR provisions the key
   if (args?.set_access_key !== undefined) {
-    const key = args.set_access_key === true
-      ? randomBytes(20).toString('hex')
-      : (args.set_access_key || null);
+    const req_key = args.set_access_key === true ? true : (args.set_access_key || null);
     const r = await fetch(`${PIR}/access-key`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
-      body:    JSON.stringify({ access_key: key }),
+      body:    JSON.stringify({ access_key: req_key }),
     });
     const data = r.ok ? await r.json() : null;
     if (!data?.ok) return fail('Could not set access key. Check your π credentials.');
-    if (!key) return ok({ access_key_set: false, note: 'Access key removed. Remove X-Pi-Access-Key from your MCP config headers.' });
+    if (!req_key) return ok({ access_key_set: false, note: 'Access key removed. Remove X-Pi-Access-Key from your MCP config headers.' });
     return ok({
       access_key_set: true,
       note: 'Access key set. Add X-Pi-Access-Key to your MCP config headers alongside X-Pi-Private:',
-      header: `X-Pi-Access-Key:${key}`,
-      mcp_args: ['--header', `X-Pi-Access-Key:${key}`],
+      header: `X-Pi-Access-Key:${data.access_key}`,
+      mcp_args: ['--header', `X-Pi-Access-Key:${data.access_key}`],
     });
   }
 
@@ -352,7 +325,7 @@ async function toolSet(piPrivate, args) {
 
   await pirUpdate(piPrivate, pirUpdates);
 
-  const validated = await pirValidate(piPrivate);
+  const validated = await pirValidate(piPrivate, accessKey);
   if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
 
   // Upsert session — always write core fields; write config fields only when provided
@@ -441,12 +414,28 @@ async function toolSet(piPrivate, args) {
     });
   }
 
+  const isNewPair = validated.nick_operator === 'operator' && validated.nick_agent === 'agent';
+
   const response = {
     status:   'connected',
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
     spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
     config:   { personality: session?.personality ?? null, behaviors, home_mcp: session?.home_mcp ?? null },
     help:     buildHelp(),
+    ...(isNewPair ? {
+      onboarding: {
+        private_pi: piPrivate,
+        message: "Welcome to π. Your pair is ready — save your private π number, it won't be shown again.",
+        questions: [
+          { step: 1, q: "Is this agent agentic — operating without a human actively in the loop?", param: null, optional: true, hint: "Skip or answer yes/no. Yes = solo agent. No = human+agent pair." },
+          { step: 2, q: "What do other people call you? (your nickname)", param: "nick_operator", optional: "only if not agentic" },
+          { step: 3, q: "What do you call your agent?", param: "nick_agent", optional: "only if not agentic", note: "Required if agentic." },
+          { step: 4, q: null, action: "Present public_pi (share freely) and private_pi (save now — not shown again)." },
+        ],
+        agentic_call:  "set({ nick_agent: 'YourAgentName' })",
+        hybrid_call:   "set({ nick_operator: 'YourName', nick_agent: 'YourAgentName' })",
+      },
+    } : {}),
   };
 
   if (scheduled.length) {
@@ -857,13 +846,13 @@ async function proxyToEntered(piPrivate, publicPi, toolName, args) {
 const BASE_TOOLS = [
   {
     name: 'set',
-    description: "Commission a new pair or boot an existing session. No credential: asks whether you have an existing π number — if yes, supply it via private_pi to get reconnect instructions; if no, supply nick_operator + nick_agent to register. Every session start: call set to load your config, spec, and activity. Also updates config: personality, behaviors, home_mcp, gateway_mcp.",
+    description: "Boot an existing session. Call set every session start to load your config, spec, and activity. Supply private_pi if not yet configured in headers. Also updates config: personality, behaviors, home_mcp, gateway_mcp, access key.",
     inputSchema: {
       type: 'object',
       properties: {
-        private_pi:    { type: 'string', description: 'Reconnect: your existing private π number.', nullable: true },
-        nick_operator: { type: 'string', description: 'Commission or rename: operator nickname.', nullable: true },
-        nick_agent:    { type: 'string', description: "Commission or rename: agent nickname. Optional — defaults to 'agent'.", nullable: true },
+        private_pi:    { type: 'string', description: 'Reconnect: your existing private π number (if not in headers).', nullable: true },
+        nick_operator: { type: 'string', description: 'Rename operator nickname.', nullable: true },
+        nick_agent:    { type: 'string', description: 'Rename agent nickname.', nullable: true },
         cc_public_pi:  { type: 'string', description: 'π address to CC on all incoming messages.', nullable: true },
         personality:   { type: 'string', description: 'Agent personality text.', nullable: true },
         behaviors:     { type: 'object', description: 'Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.', nullable: true },
@@ -918,7 +907,7 @@ const BASE_TOOLS = [
 
 // ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
-async function handleJsonRpc(piPrivate, body) {
+async function handleJsonRpc(piPrivate, body, accessKey) {
   const { method, id, params } = body;
 
   if (method === 'initialize') {
@@ -929,9 +918,7 @@ async function handleJsonRpc(piPrivate, body) {
         capabilities:    { tools: { listChanged: true } },
         serverInfo:      { name: 'pi-gateway', version: GATEWAY_VERSION },
         instructions:    "IMPORTANT: Call the 'set' tool immediately — before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
-        nextStep:        piPrivate
-          ? 'Call set to connect.'
-          : 'New? Call set to commission your pair — takes 30 seconds.',
+        nextStep:        'Call set to connect.',
       },
     };
   }
@@ -971,7 +958,7 @@ async function handleJsonRpc(piPrivate, body) {
       let result;
 
       if (toolName === 'set') {
-        result = await toolSet(piPrivate, args);
+        result = await toolSet(piPrivate, args, accessKey);
       } else {
         if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
           return { jsonrpc: '2.0', id, result: noIdentity() };
@@ -1317,127 +1304,65 @@ app.post(`${PREFIX}/register`, express.json(), (req, res) => {
   });
 });
 
-app.get(`${PREFIX}/authorize`, (req, res) => {
-  const { client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
+app.get(`${PREFIX}/authorize`, async (req, res) => {
+  const { client_id, redirect_uri, state, code_challenge } = req.query;
   if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
 
-  // Direct path: client_id is a valid private pi (Advanced Settings — skip form)
+  // Direct path: client_id is a valid private pi (preconfigured in connector)
   if (client_id && PRIVATE_PI_RE.test(String(client_id).trim())) {
     const code = randomUUID();
-    oauthCodes.set(code, { piPrivate: String(client_id).trim(), accessKey: null, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000, src: 'direct' });
+    oauthCodes.set(code, { piPrivate: String(client_id).trim(), challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000 });
     const url = new URL(String(redirect_uri));
     url.searchParams.set('code', code);
     if (state) url.searchParams.set('state', String(state));
     return res.redirect(url.toString());
   }
 
+  // Form for manual PI entry
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(oauthCard('Connect to π', `
 <span class="pi-mark">π</span>
-<h1>Connect to <span style="color:#6B8F71;font-family:Georgia,serif">π</span></h1>
-<p>New here? Leave the id blank — we'll create your pair.</p>
-<form method="POST" autocomplete="off">
-<input type="hidden" name="redirect_uri"          value="${esc(redirect_uri)}">
-<input type="hidden" name="state"                 value="${esc(state)}">
-<input type="hidden" name="code_challenge"        value="${esc(code_challenge)}">
-<input type="hidden" name="code_challenge_method" value="${esc(code_challenge_method)}">
-<div class="label-row"><label>Operator nickname</label><span class="opt">leave blank if registering an agentic agent</span></div>
-<input id="op" type="text"     name="nick_operator" autocomplete="off">
-<div class="label-row"><label>Agent nickname</label><span class="opt">optional when agent isn't agentic</span></div>
-<input id="ag" type="text"     name="nick_agent"    autocomplete="off">
-<div class="label-row"><label>π private id</label><span class="opt">leave blank if you're new</span></div>
-<input type="text" name="pi_key" id="pikey" autocomplete="off">
-<button type="submit">Connect</button>
-</form>
-<script>
-document.getElementById('op').placeholder='what people call you';
-document.getElementById('ag').placeholder='what you call your agent — if nobody’s listening';
-document.getElementById('pikey').placeholder="I'm new here";
-</script>`));
+<h1>Connect to π</h1>
+<p>Enter your π private key to continue.</p>
+<form method="POST">
+  <input type="hidden" name="redirect_uri" value="${esc(redirect_uri)}">
+  <input type="hidden" name="state" value="${esc(state ?? '')}">
+  <input type="hidden" name="code_challenge" value="${esc(code_challenge ?? '')}">
+  <div class="label-row"><label>π private key</label></div>
+  <input type="password" name="pi_key" placeholder="3.14…" autocomplete="off" required>
+  <div class="label-row"><label>Access key</label><span class="opt">(optional)</span></div>
+  <input type="password" name="access_key" placeholder="" autocomplete="off">
+  <button>Connect</button>
+</form>`));
 });
 
 app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
-  const { nick_operator, nick_agent, pi_key, redirect_uri, state, code_challenge } = req.body ?? {};
-  const opNick = nick_operator?.trim() || null;
-  const agNick = nick_agent?.trim() || null;
-  if ((!opNick && !agNick) || !redirect_uri) return res.status(400).send('Missing required fields');
+  const { pi_key, access_key, redirect_uri, state, code_challenge } = req.body ?? {};
+  if (!pi_key || !redirect_uri) return res.status(400).send('Missing required fields');
 
-  const piKey = pi_key?.trim() || null;
+  const piKey  = pi_key.trim();
+  const accKey = access_key?.trim() || null;
 
   const errPage = msg => res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8').send(
-    oauthCard('Error — π', `<h1>Connect to <span style="color:#6B8F71;font-family:Georgia,serif">π</span></h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#7EAB85">← Back</a>`)
+    oauthCard('Error — π', `<span class="pi-mark">π</span><h1>Connect to π</h1><p class="err">${esc(msg)}</p><a href="javascript:history.back()" style="font-size:.85rem;color:#7EAB85">← Back</a>`)
   );
 
-  if (piKey) {
-    // Existing user: validate pi_key against PIR
-    if (!PRIVATE_PI_RE.test(piKey)) return errPage("That doesn't look like a valid π key.");
-    const validated = await pirValidate(piKey);
-    if (!validated?.valid) return errPage('Invalid π key. Double-check it or leave blank to create a new pair.');
-    const code = randomUUID();
-    oauthCodes.set(code, { piPrivate: piKey, accessKey: null, challenge: code_challenge, expires: Date.now() + 5 * 60_000, src: 'form' });
-    const url = new URL(redirect_uri);
-    url.searchParams.set('code', code);
-    if (state) url.searchParams.set('state', state);
-    return res.redirect(url.toString());
-  }
+  if (!PRIVATE_PI_RE.test(piKey)) return errPage("That doesn't look like a valid π key. Check it and try again.");
 
-  // New user: auto-provision via PIR
-  const reg = await fetch(`${PIR}/id`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ nick_operator: opNick || agNick, nick_agent: agNick || 'agent', gateway_mcp: selfUrl() }),
-  }).catch(() => null);
-  if (!reg?.ok) {
-    const err = reg ? (await reg.json().catch(() => ({}))).error : 'Network error';
-    return errPage(err ?? 'Could not create your pair — try again.');
-  }
-  const { private_pi, public_pi } = await reg.json();
+  const validated = await pirValidate(piKey, accKey);
+  if (!validated?.valid) return errPage(validated?.error || 'Invalid π key — check it and try again.');
 
   const code = randomUUID();
-  oauthCodes.set(code, { piPrivate: private_pi, accessKey: null, challenge: code_challenge, expires: Date.now() + 10 * 60_000, src: 'form' });
+  oauthCodes.set(code, { piPrivate: piKey, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000 });
 
-  const continueUrl = new URL(redirect_uri);
-  continueUrl.searchParams.set('code', code);
-  if (state) continueUrl.searchParams.set('state', state);
-
-  const pk = esc(private_pi);
-  const continueHref = esc(continueUrl.toString());
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(oauthCard('Your π — save before continuing', `
-<h1>Welcome, ${esc(opNick || agNick)}.</h1>
-<span class="slabel" style="margin-top:1.6rem">Your public π address is</span>
-<div class="copy-wrap" id="pub-wrap">
-  <span class="copy-val" id="pub">${esc(public_pi)}</span>
-  <button class="copy-btn" onclick="doCopy('pub','pub-wrap')">copy</button>
-</div>
-<p class="share-note">Share this freely with your contacts.</p>
-<span class="slabel" style="margin-top:1.4rem">π private id</span>
-<div class="copy-wrap" id="pk-wrap">
-  <span class="copy-val" id="pk">${pk}</span>
-  <button class="copy-btn" onclick="doCopy('pk','pk-wrap')">copy</button>
-</div>
-<p class="warn">⚠ Not shown again — save before continuing.</p>
-<p class="cd-text">Continuing in <strong id="ct">30</strong>s — or <a class="cd-link" onclick="go()">go now</a></p>
-<script>
-function doCopy(id,wrapId){
-  var txt=document.getElementById(id).textContent;
-  navigator.clipboard?.writeText(txt).then(function(){
-    var btn=document.querySelector('#'+wrapId+' .copy-btn');
-    var prev=btn.textContent; btn.textContent='✓';
-    setTimeout(function(){btn.textContent=prev;},2000);
-  });
-}
-var _href=${JSON.stringify(continueUrl.toString())};
-function go(){window.location.href=_href;}
-var t=30,tick=setInterval(function(){
-  t--;document.getElementById('ct').textContent=t;
-  if(t<=0){clearInterval(tick);go();}
-},1000);
-</script>`));
+  const url = new URL(String(redirect_uri));
+  url.searchParams.set('code', code);
+  if (state) url.searchParams.set('state', String(state));
+  return res.redirect(url.toString());
 });
 
 app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
-  const { grant_type, code, code_verifier, client_secret } = req.body ?? {};
+  const { grant_type, code, code_verifier } = req.body ?? {};
   if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
 
   const entry = oauthCodes.get(code);
@@ -1447,24 +1372,12 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
   if (expected !== entry.challenge) { oauthCodes.delete(code); return res.status(400).json({ error: 'invalid_grant' }); }
   oauthCodes.delete(code);
 
-  // Direct path: validate at token time (client_secret = access_key for secured pairs)
   if (entry.src === 'direct') {
-    let secret = client_secret?.trim() || null;
-    if (!secret) {
-      const basic = req.headers['authorization'] ?? '';
-      if (basic.startsWith('Basic ')) {
-        const decoded = Buffer.from(basic.slice(6), 'base64').toString();
-        const sep = decoded.indexOf(':');
-        if (sep !== -1) secret = decoded.slice(sep + 1).trim() || null;
-      }
-    }
     const validated = await pirValidate(entry.piPrivate);
     if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
-    entry.accessKey = secret;
   }
 
-  const token = entry.accessKey ? `${entry.piPrivate}|${entry.accessKey}` : entry.piPrivate;
-  res.json({ access_token: token, token_type: 'Bearer', expires_in: 7 * 24 * 3600 });
+  res.json({ access_token: entry.piPrivate, token_type: 'Bearer', expires_in: 7 * 24 * 3600 });
 });
 
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
@@ -1561,17 +1474,22 @@ ${Object.entries(data.setup.config_locations).map(([a, paths]) =>
 
 app.post(`${PREFIX}/mcp`, async (req, res) => {
   let piPrivate = req.headers['x-pi-private'] ?? null;
+  let accessKey = req.headers['x-pi-access-key'] ?? null;
   if (!piPrivate) {
     const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
       ? req.headers['authorization'].slice(7) : null;
-    if (bearer) piPrivate = bearer.split('|')[0].trim() || null;
+    if (bearer) {
+      const parts = bearer.split('|');
+      piPrivate = parts[0].trim() || null;
+      if (parts[1] && !accessKey) accessKey = parts[1].trim() || null;
+    }
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   if (!piPrivate && body.method !== 'initialize' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
-  return res.json(await handleJsonRpc(piPrivate, body));
+  return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
 // ── SSE transport ─────────────────────────────────────────────────────────────
@@ -1597,17 +1515,22 @@ app.get(`${PREFIX}/sse`, (req, res) => {
 
 app.post(`${PREFIX}/messages`, async (req, res) => {
   let piPrivate = req.headers['x-pi-private'] ?? null;
+  let accessKey = req.headers['x-pi-access-key'] ?? null;
   if (!piPrivate) {
     const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
       ? req.headers['authorization'].slice(7) : null;
-    if (bearer) piPrivate = bearer.split('|')[0].trim() || null;
+    if (bearer) {
+      const parts = bearer.split('|');
+      piPrivate = parts[0].trim() || null;
+      if (parts[1] && !accessKey) accessKey = parts[1].trim() || null;
+    }
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   if (!piPrivate && body.method !== 'initialize' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
-  return res.json(await handleJsonRpc(piPrivate, body));
+  return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
