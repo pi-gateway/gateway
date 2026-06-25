@@ -1,4 +1,4 @@
-// π Gateway v2.8.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
+// π Gateway v2.9.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.8.0';
+const GATEWAY_VERSION  = '2.9.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -166,15 +166,14 @@ enter
 
 // ── Contacts helper ───────────────────────────────────────────────────────────
 
-async function upsertContact(ownerPublicPi, contact) {
-  await pool.query(`
-    INSERT INTO contacts (owner_public_pi, contact_public_pi, contact_nick_agent, contact_nick_operator, accessed_at)
-    VALUES ($1, $2, $3, $4, NOW())
-    ON CONFLICT (owner_public_pi, contact_public_pi) DO UPDATE SET
-      contact_nick_agent    = COALESCE(EXCLUDED.contact_nick_agent,    contacts.contact_nick_agent),
-      contact_nick_operator = COALESCE(EXCLUDED.contact_nick_operator, contacts.contact_nick_operator),
-      accessed_at = NOW()
-  `, [ownerPublicPi, contact.public_pi, contact.nick_agent ?? null, contact.nick_operator ?? null]);
+async function upsertContact(piPrivate, contact) {
+  try {
+    await fetch(`${PIR}/contacts`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+      body:    JSON.stringify({ contact_public_pi: contact.public_pi }),
+    });
+  } catch { /* best effort */ }
 }
 
 // ── Ambient brief ─────────────────────────────────────────────────────────────
@@ -308,36 +307,32 @@ async function toolSet(piPrivate, args, accessKey) {
   const publicPi = toPublicPi(piPrivate);
 
   // Config updates
-  const configKeys  = ['personality', 'behaviors', 'home_mcp', 'gateway_mcp', 'cc_public_pi'];
-  const pirKeys     = ['nick_operator', 'nick_agent'];
+  const pirKeys     = ['nick_operator', 'nick_agent', 'personality', 'behaviors', 'home_mcp', 'gateway_mcp'];
   const localUpdates = {};
   const pirUpdates  = { gateway_mcp: selfUrl() };
 
-  for (const key of configKeys) {
-    if (args[key] !== undefined) {
-      if (key === 'gateway_mcp') pirUpdates[key] = args[key];
-      else localUpdates[key] = args[key];
-    }
-  }
   for (const key of pirKeys) {
     if (args[key] !== undefined) pirUpdates[key] = args[key];
   }
+  if (args.cc_public_pi !== undefined) localUpdates.cc_public_pi = args.cc_public_pi;
 
   await pirUpdate(piPrivate, pirUpdates);
 
   const validated = await pirValidate(piPrivate, accessKey);
   if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
 
-  // Upsert session — always write core fields; write config fields only when provided
+  // Upsert session — core fields + home_mcp cache from PIR; personality/behaviors now live in PIR
   const upsertCols = ['public_pi', 'nick_agent', 'nick_operator', 'last_seen', 'home_mcp'];
   const upsertVals = [publicPi, validated.nick_agent, validated.nick_operator, new Date().toISOString(), validated.home_mcp ?? null];
 
-  for (const key of ['personality', 'behaviors', 'cc_public_pi']) {
-    if (localUpdates[key] !== undefined) {
-      upsertCols.push(key);
-      upsertVals.push(key === 'behaviors' ? JSON.stringify(localUpdates[key]) : localUpdates[key]);
-    }
+  if (localUpdates.cc_public_pi !== undefined) {
+    upsertCols.push('cc_public_pi');
+    upsertVals.push(localUpdates.cc_public_pi);
   }
+
+  // connected_url reset to null on every set() — fresh session, no stale enter state
+  upsertCols.push('connected_url', 'connected_name', 'connected_tools');
+  upsertVals.push(null, null, null);
 
   const placeholders = upsertVals.map((_, i) => `$${i + 1}`).join(', ');
   const updateSets   = upsertCols
@@ -351,13 +346,15 @@ async function toolSet(piPrivate, args, accessKey) {
     upsertVals
   );
 
-  // Load full session
+  // Load session state (personality/behaviors/home_mcp now come from PIR via validated)
   const { rows: [session] } = await pool.query(`
-    SELECT home_mcp, personality, behaviors, connected_url, connected_name, connected_tools
+    SELECT connected_url, connected_name, connected_tools, cc_public_pi
     FROM mcp_sessions WHERE public_pi = $1
   `, [publicPi]);
 
-  const behaviors = session?.behaviors ?? { auto_log: true, session_end_log: true, start_with_last_log: true, auto_check_activity: true };
+  const behaviors   = validated.behaviors  ?? { auto_log: true, session_end_log: true, start_with_last_log: true, auto_check_activity: true };
+  const personality = validated.personality ?? null;
+  const homeMcp     = validated.home_mcp    ?? null;
   const now = new Date().toISOString();
 
   // Scheduled posts due now
@@ -396,17 +393,13 @@ async function toolSet(piPrivate, args, accessKey) {
     }
 
     const senderPis = [...new Set(inboxPosts.map(p => p.from_public_pi).filter(Boolean))];
-    const { rows: senderContacts } = senderPis.length
-      ? await pool.query(
-          'SELECT contact_public_pi, contact_nick_agent, contact_nick_operator FROM contacts WHERE owner_public_pi = $1 AND contact_public_pi = ANY($2)',
-          [publicPi, senderPis]
-        )
-      : { rows: [] };
-
-    const nickMap = new Map(senderContacts.map(c => [
-      c.contact_public_pi,
-      { nick_agent: c.contact_nick_agent, nick_operator: c.contact_nick_operator },
-    ]));
+    const nickMap = new Map();
+    if (senderPis.length) {
+      await Promise.all(senderPis.map(async pi => {
+        const info = await pirLookup(pi);
+        if (info) nickMap.set(pi, { nick_agent: info.nick_agent, nick_operator: info.nick_operator });
+      }));
+    }
 
     inboxMessages = inboxPosts.map(({ accessed_at: _a, url: _u, from_public_pi, ...rest }) => {
       const nick = nickMap.get(from_public_pi);
@@ -420,7 +413,7 @@ async function toolSet(piPrivate, args, accessKey) {
     status:   'connected',
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
     spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-    config:   { personality: session?.personality ?? null, behaviors, home_mcp: session?.home_mcp ?? null },
+    config:   { personality, behaviors, home_mcp: homeMcp },
     help:     buildHelp(),
     ...(isNewPair ? {
       onboarding: {
@@ -455,29 +448,29 @@ async function toolSet(piPrivate, args, accessKey) {
     response.last_log = lastLog ?? null;
   }
 
-  // home_mcp: auto-enter + full-mount detection
-  if (session?.home_mcp) {
-    const alreadyMounted = session.connected_url === session.home_mcp;
+  // home_mcp: auto-enter + full-mount detection (homeMcp from PIR validate)
+  if (homeMcp) {
+    const alreadyMounted = session?.connected_url === homeMcp;
     const FOUR_VERBS = ['set', 'browse', 'post', 'enter'];
     let isFullMount = false;
 
     if (!alreadyMounted) {
-      const entered    = await toolEnter(piPrivate, publicPi, { url: session.home_mcp });
+      const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp });
       const enteredData = JSON.parse(entered.content[0].text);
       const serverTools = enteredData.tools?.server ?? [];
       isFullMount = FOUR_VERBS.every(n => serverTools.some(t => t.name === n));
       if (!isFullMount) response.home_mcp_entered = entered;
     } else {
-      const savedTools = session.connected_tools ?? [];
+      const savedTools = session?.connected_tools ?? [];
       isFullMount = FOUR_VERBS.every(n => savedTools.some(t => t.name === n));
       if (!isFullMount) {
-        const entered    = await toolEnter(piPrivate, publicPi, { url: session.home_mcp });
+        const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp });
         const enteredData = JSON.parse(entered.content[0].text);
         const freshTools  = enteredData.tools?.server ?? [];
         isFullMount = FOUR_VERBS.every(n => freshTools.some(t => t.name === n));
         if (!isFullMount) {
-          response.home_mcp  = session.home_mcp;
-          response.connected = session.connected_name ?? session.connected_url;
+          response.home_mcp  = homeMcp;
+          response.connected = session?.connected_name ?? session?.connected_url;
         }
       }
     }
@@ -528,14 +521,13 @@ async function toolBrowse(piPrivate, publicPi, args) {
     }
 
     const senderPis = [...new Set(posts.map(p => p.from_public_pi).filter(Boolean))];
-    const { rows: senderContacts } = senderPis.length
-      ? await pool.query(
-          'SELECT contact_public_pi, contact_nick_agent, contact_nick_operator FROM contacts WHERE owner_public_pi = $1 AND contact_public_pi = ANY($2)',
-          [publicPi, senderPis]
-        )
-      : { rows: [] };
-
-    const nickMap  = new Map(senderContacts.map(c => [c.contact_public_pi, { nick_agent: c.contact_nick_agent, nick_operator: c.contact_nick_operator }]));
+    const nickMap = new Map();
+    if (senderPis.length) {
+      await Promise.all(senderPis.map(async pi => {
+        const info = await pirLookup(pi);
+        if (info) nickMap.set(pi, { nick_agent: info.nick_agent, nick_operator: info.nick_operator });
+      }));
+    }
     const messages = posts.map(({ accessed_at: _a, from_public_pi, ...rest }) => {
       const nick = nickMap.get(from_public_pi);
       return { ...rest, from_public_pi, from_nick_agent: nick?.nick_agent ?? null, from_nick_operator: nick?.nick_operator ?? null };
@@ -644,10 +636,7 @@ async function toolPost(piPrivate, publicPi, args) {
   const content_type = args.content_type || inferContentType(content);
   const fileName     = name || (content_type !== 'json' ? `post-${Date.now()}.${content_type}` : null);
 
-  const { rows: [senderSession] } = await pool.query(
-    'SELECT nick_agent, nick_operator FROM mcp_sessions WHERE public_pi = $1',
-    [publicPi]
-  );
+  const senderInfo = await pirLookup(publicPi);
 
   const toRaw = resolvedTo.startsWith('@') ? resolvedTo.slice(1) : resolvedTo;
 
@@ -674,10 +663,13 @@ async function toolPost(piPrivate, publicPi, args) {
 
   // Contacts broadcast
   if (toRaw === 'contacts') {
-    const { rows: myContacts } = await pool.query(
-      'SELECT contact_public_pi, contact_nick_agent, contact_nick_operator FROM contacts WHERE owner_public_pi = $1',
-      [publicPi]
-    );
+    const pirResp  = await fetch(`${PIR}/contacts`, { headers: { 'X-Pi-Private': piPrivate } });
+    const pirData  = pirResp.ok ? await pirResp.json() : { contacts: [] };
+    const myContacts = (pirData.contacts ?? []).map(c => ({
+      contact_public_pi:     c.contact_public_pi,
+      contact_nick_agent:    c.nick_agent,
+      contact_nick_operator: c.nick_operator,
+    }));
     if (!myContacts.length) return ok({ posted: false, note: 'No contacts yet. Post to a nickname first.' });
 
     const results = [];
@@ -691,7 +683,7 @@ async function toolPost(piPrivate, publicPi, args) {
       const delivered = await deliverToGateway({
         from_public_pi: publicPi, to_public_pi: c.contact_public_pi,
         content, content_type, name: fileName ?? null, reply_to: reply_to ?? null, url: url ?? null, at: at ?? null,
-        from_nick_agent: senderSession?.nick_agent ?? null, from_nick_operator: senderSession?.nick_operator ?? null,
+        from_nick_agent: senderInfo?.nick_agent ?? null, from_nick_operator: senderInfo?.nick_operator ?? null,
         post_id: post?.id,
       }, target);
       results.push({ to: c.contact_nick_agent ?? c.contact_public_pi, delivered });
@@ -719,7 +711,7 @@ async function toolPost(piPrivate, publicPi, args) {
   const payload = {
     from_public_pi: publicPi, to_public_pi: target.public_pi,
     content, content_type, name: fileName ?? null, reply_to: reply_to ?? null, url: url ?? null, at: at ?? null,
-    from_nick_agent: senderSession?.nick_agent ?? null, from_nick_operator: senderSession?.nick_operator ?? null,
+    from_nick_agent: senderInfo?.nick_agent ?? null, from_nick_operator: senderInfo?.nick_operator ?? null,
     post_id: post?.id,
   };
 
@@ -735,7 +727,7 @@ async function toolPost(piPrivate, publicPi, args) {
     delivered = await deliverToGateway(payload, target);
   }
 
-  await upsertContact(publicPi, { public_pi: target.public_pi, nick_agent: target.nick_agent, nick_operator: target.nick_operator });
+  await upsertContact(piPrivate, { public_pi: target.public_pi });
 
   if (url) fireUrl(url, content, content_type, publicPi, post?.id).catch(() => {});
 
@@ -775,12 +767,12 @@ async function toolEnter(piPrivate, publicPi, args) {
     [publicPi]
   );
   if (cur?.connected_url && cur.connected_url === targetUrl && cur.connected_url !== cur.home_mcp) {
+    if (cur.home_mcp) return toolEnter(piPrivate, publicPi, { url: cur.home_mcp });
     await pool.query(
       'UPDATE mcp_sessions SET connected_url = NULL, connected_name = NULL, connected_tools = NULL WHERE public_pi = $1',
       [publicPi]
     );
-    const home = cur.home_mcp ?? myUrl;
-    return ok({ status: 'exited', note: `Disconnected from ${targetName}. Home: ${home}.` });
+    return ok({ status: 'exited', note: `Disconnected from ${targetName}.` });
   }
 
   try {
@@ -1079,14 +1071,8 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
     return res.status(500).json({ error: String(e) });
   }
 
-  // Auto-contact
-  if (body.from_public_pi) {
-    await upsertContact(body.to_public_pi, {
-      public_pi:     body.from_public_pi,
-      nick_agent:    body.from_nick_agent    ?? undefined,
-      nick_operator: body.from_nick_operator ?? undefined,
-    }).catch(() => {});
-  }
+  // Auto-contact on deliver removed: contacts are managed via PIR.
+  // piPrivate not available in /deliver context; contacts establish via post flows.
 
   // CC routing
   const { rows: [recipientSession] } = await pool.query(
