@@ -1,4 +1,4 @@
-// π Gateway v2.10.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
+// π Gateway v2.10.1 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.10.0';
+const GATEWAY_VERSION  = '2.10.1';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -1497,7 +1497,6 @@ app.get(`${PREFIX}/sse`, (req, res) => {
 
   const piPrivate = req.headers['x-pi-private'] ?? null;
   const publicPi  = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? toPublicPi(piPrivate) : null;
-  console.log('[SSE] pi=' + (publicPi ?? 'none') + ' ua=' + (req.headers['user-agent'] ?? '').slice(0, 80));
   if (publicPi) sseClients.set(publicPi, res);
 
   const ping = setInterval(() => {
