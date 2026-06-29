@@ -1,4 +1,4 @@
-// π Gateway v2.9.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
+// π Gateway v2.10.0 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.9.0';
+const GATEWAY_VERSION  = '2.10.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -24,6 +24,7 @@ const PUBLIC_PI_RE  = /^3\.14\d{10}$/;
 const DEFAULT_ADMIN = '3.147185839309';
 
 const oauthCodes = new Map(); // code → { piPrivate, challenge, expires, src }
+const sseClients = new Map(); // publicPi → SSE res
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,14 @@ function ok(data) {
 
 function fail(msg, detail) {
   return { content: [{ type: 'text', text: JSON.stringify({ error: msg, ...(detail ? { detail } : {}) }) }] };
+}
+
+function notifyToolsChanged(publicPi) {
+  const res = sseClients.get(publicPi);
+  if (!res) return;
+  try {
+    res.write('event: message\ndata: ' + JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed', params: {} }) + '\n\n');
+  } catch { sseClients.delete(publicPi); }
 }
 
 function noIdentity() {
@@ -767,11 +776,16 @@ async function toolEnter(piPrivate, publicPi, args) {
     [publicPi]
   );
   if (cur?.connected_url && cur.connected_url === targetUrl && cur.connected_url !== cur.home_mcp) {
-    if (cur.home_mcp) return toolEnter(piPrivate, publicPi, { url: cur.home_mcp });
+    if (cur.home_mcp) {
+      const exitResult = await toolEnter(piPrivate, publicPi, { url: cur.home_mcp });
+      notifyToolsChanged(publicPi);
+      return exitResult;
+    }
     await pool.query(
       'UPDATE mcp_sessions SET connected_url = NULL, connected_name = NULL, connected_tools = NULL WHERE public_pi = $1',
       [publicPi]
     );
+    notifyToolsChanged(publicPi);
     return ok({ status: 'exited', note: `Disconnected from ${targetName}.` });
   }
 
@@ -811,6 +825,7 @@ async function toolEnter(piPrivate, publicPi, args) {
     const gatewayTools = BASE_TOOLS.map(t => ({ name: t.name, description: t.description }));
     const serverTools  = tools.map(t => ({ name: t.name, description: `[${targetName}] ${t.description ?? ''}`.trim() }));
 
+    notifyToolsChanged(publicPi);
     return ok({
       entered: targetName,
       url:     targetUrl,
@@ -1480,11 +1495,19 @@ app.get(`${PREFIX}/sse`, (req, res) => {
 
   res.write(`event: endpoint\ndata: ${JSON.stringify({ uri: messagesUrl })}\n\n`);
 
+  const piPrivate = req.headers['x-pi-private'] ?? null;
+  const publicPi  = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? toPublicPi(piPrivate) : null;
+  console.log('[SSE] pi=' + (publicPi ?? 'none') + ' ua=' + (req.headers['user-agent'] ?? '').slice(0, 80));
+  if (publicPi) sseClients.set(publicPi, res);
+
   const ping = setInterval(() => {
     try { res.write(': ping\n\n'); } catch { clearInterval(ping); }
   }, 20_000);
 
-  req.on('close', () => clearInterval(ping));
+  req.on('close', () => {
+    clearInterval(ping);
+    if (publicPi) sseClients.delete(publicPi);
+  });
 });
 
 app.post(`${PREFIX}/messages`, async (req, res) => {
