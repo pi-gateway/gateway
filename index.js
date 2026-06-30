@@ -1,4 +1,4 @@
-// π Gateway v2.10.1 — set · browse · post · enter · SSE transport · full-mount · OAuth connector
+// π Gateway v3.0.0 — pi · browse · post · mount · SSE transport · full-mount · OAuth connector
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '2.10.1';
+const GATEWAY_VERSION  = '3.0.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -128,16 +128,16 @@ Your π address is ${publicPi}. Share this freely. Never share your private key.
 
 ## Your four tools
 
-set     Commission, config, help. Call with no args to see current config and this reference.
+pi      Commission, config, help. Call with no args to see current config and this reference.
 browse  Read everything. Default: activity (unread inbox). Targets: activity · contacts · servers · history · files
 post    Write, send, share. Default recipient: self. Content: json (ephemeral) · md · svg · webp (permanent)
-enter   Connect to any MCP. Returns their tools. Call them directly after entering.
+mount   Connect to any MCP. Returns their tools. Call them directly after mounting.
 
 ## Addressing
 Recipient names are plain values — no sigils. "Paulo", "3.14718583930991", "contacts", "all".
 
 ## Session rhythm
-Call set on every session start. Unread inbox is included in the set response as "inbox" — no need to call browse on startup. Post to self (content_type md) at session end as a save point for next time.
+Call pi on every session start. Unread inbox is included in the pi response as "inbox" — no need to call browse on startup. Post to self (content_type md) at session end as a save point for next time.
 
 π never resolves — it grows.`;
 }
@@ -145,17 +145,17 @@ Call set on every session start. Unread inbox is included in the set response as
 function buildHelp() {
   return `## Tool reference
 
-set
+pi
   Commission a new pair or boot an existing one. Config: personality, behaviors, home_mcp, gateway_mcp.
   Behaviors (all on by default): auto_log · session_end_log · start_with_last_log · auto_check_activity
-  Call set with no args to see current config.
+  Call pi with no args to see current config.
 
 browse
   Always returns: activity brief (unread/mentions) + your public π address.
   Targets:
     activity  unread messages + scheduled posts now due (default)
     contacts  your network. query param searches by nickname.
-    servers   π registry + MCPs you've entered
+    servers   π registry + mounted MCPs
     history   recent sent/received + immediate self-posts
     files     your documents (.md · .svg · .webp)
 
@@ -167,10 +167,10 @@ post
   Thread: reply_to = post ID. Reply scope defaults to original recipients.
   API: url = endpoint. Fires on post. Feedback returned as self-note.
 
-enter
-  url or name → connects via MCP protocol, returns full tool list.
-  π base tools always present. Entered tools stack on top.
-  Call entered tools directly by name.`;
+mount
+  url or name → mounts via MCP protocol, returns full tool list.
+  π base tools always present. Mounted tools stack on top.
+  Call mounted tools directly by name.`;
 }
 
 // ── Contacts helper ───────────────────────────────────────────────────────────
@@ -261,7 +261,7 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
   }
 }
 
-// ── Tool: set ─────────────────────────────────────────────────────────────────
+// ── Tool: pi ──────────────────────────────────────────────────────────────────
 
 async function toolSet(piPrivate, args, accessKey) {
   if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
@@ -434,8 +434,8 @@ async function toolSet(piPrivate, args, accessKey) {
           { step: 3, q: "What do you call your agent?", param: "nick_agent", optional: "only if not agentic", note: "Required if agentic." },
           { step: 4, q: null, action: "Present public_pi (share freely) and private_pi (save now — not shown again)." },
         ],
-        agentic_call:  "set({ nick_agent: 'YourAgentName' })",
-        hybrid_call:   "set({ nick_operator: 'YourName', nick_agent: 'YourAgentName' })",
+        agentic_call:  "pi({ nick_agent: 'YourAgentName' })",
+        hybrid_call:   "pi({ nick_operator: 'YourName', nick_agent: 'YourAgentName' })",
       },
     } : {}),
   };
@@ -460,7 +460,7 @@ async function toolSet(piPrivate, args, accessKey) {
   // home_mcp: auto-enter + full-mount detection (homeMcp from PIR validate)
   if (homeMcp) {
     const alreadyMounted = session?.connected_url === homeMcp;
-    const FOUR_VERBS = ['set', 'browse', 'post', 'enter'];
+    const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
     let isFullMount = false;
 
     if (!alreadyMounted) {
@@ -485,7 +485,7 @@ async function toolSet(piPrivate, args, accessKey) {
     }
 
     if (isFullMount) {
-      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, 'set', args);
+      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, 'pi', args);
       const homeMcpData   = JSON.parse(homeMcpResult.content[0].text);
       if (!homeMcpData.error) return homeMcpResult;
     }
@@ -743,7 +743,7 @@ async function toolPost(piPrivate, publicPi, args) {
   return ok({ posted: true, id: post?.id, to: target.public_pi, pair: `${target.nick_agent} (${target.nick_operator})`, delivered, content_type, name: fileName });
 }
 
-// ── Tool: enter ───────────────────────────────────────────────────────────────
+// ── Tool: mount ───────────────────────────────────────────────────────────────
 
 async function toolEnter(piPrivate, publicPi, args) {
   let targetUrl  = null;
@@ -847,7 +847,7 @@ async function proxyToEntered(piPrivate, publicPi, toolName, args) {
     [publicPi]
   );
   if (!session?.connected_url) {
-    return fail(`Unknown tool "${toolName}". Call enter to connect to an MCP first.`);
+    return fail(`Unknown tool "${toolName}". Call mount to connect to an MCP first.`);
   }
   try {
     const r = await fetch(session.connected_url, {
@@ -867,8 +867,8 @@ async function proxyToEntered(piPrivate, publicPi, toolName, args) {
 
 const BASE_TOOLS = [
   {
-    name: 'set',
-    description: "Boot an existing session. Call set every session start to load your config, spec, and activity. Supply private_pi if not yet configured in headers. Also updates config: personality, behaviors, home_mcp, gateway_mcp, access key.",
+    name: 'pi',
+    description: "Boot a session. Call pi every session start to load your config, spec, and activity. Supply private_pi if not yet configured in headers. Also updates config: personality, behaviors, home_mcp, gateway_mcp, access key.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -915,8 +915,8 @@ const BASE_TOOLS = [
     },
   },
   {
-    name: 'enter',
-    description: "Connect to any MCP on the π network — registered or not. Returns the full tool list: π base tools + server tools. That's your help for that server. Call server tools directly by name after entering.",
+    name: 'mount',
+    description: "Mount any MCP on the π network — registered or not. Returns the full tool list: π base tools + server tools. That's your help for that server. Call server tools directly by name after mounting.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -937,10 +937,10 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
       jsonrpc: '2.0', id,
       result: {
         protocolVersion: '2024-11-05',
-        capabilities:    { tools: { listChanged: true } },
+        capabilities:    { tools: { listChanged: false } },
         serverInfo:      { name: 'pi-gateway', version: GATEWAY_VERSION },
-        instructions:    "IMPORTANT: Call the 'set' tool immediately — before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
-        nextStep:        'Call set to connect.',
+        instructions:    "IMPORTANT: If your environment uses deferred tool schemas (e.g. claude.ai), first call ToolSearch with query 'pi browse post mount' to load all π tool schemas. Then call 'pi' immediately before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
+        nextStep:        'Load tool schemas if needed (ToolSearch: "pi browse post mount"), then call pi.',
       },
     };
   }
@@ -955,7 +955,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
       );
       if (session?.connected_tools?.length) {
         const savedTools = session.connected_tools;
-        const FOUR_VERBS = ['set', 'browse', 'post', 'enter'];
+        const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
         const isFullMount = session.home_mcp &&
           session.connected_url === session.home_mcp &&
           FOUR_VERBS.every(n => savedTools.some(t => t.name === n));
@@ -990,7 +990,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
     try {
       let result;
 
-      if (toolName === 'set') {
+      if (toolName === 'pi') {
         result = await toolSet(piPrivate, args, accessKey);
       } else {
         if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
@@ -1002,7 +1002,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           'SELECT home_mcp, connected_url, connected_tools FROM mcp_sessions WHERE public_pi = $1',
           [publicPi]
         );
-        const FOUR_VERBS = ['set', 'browse', 'post', 'enter'];
+        const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
         const isFullMount = fmSession?.home_mcp &&
           fmSession?.connected_url === fmSession?.home_mcp &&
           FOUR_VERBS.every(n => (fmSession?.connected_tools ?? []).some(t => t.name === n));
@@ -1013,7 +1013,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           switch (toolName) {
             case 'browse': result = await toolBrowse(piPrivate, publicPi, args); break;
             case 'post':   result = await toolPost(piPrivate, publicPi, args);   break;
-            case 'enter':  result = await toolEnter(piPrivate, publicPi, args);  break;
+            case 'mount':  result = await toolEnter(piPrivate, publicPi, args);  break;
             default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args);
           }
         }
@@ -1023,6 +1023,10 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
     } catch (e) {
       return { jsonrpc: '2.0', id, result: fail('Unexpected error.', String(e)) };
     }
+  }
+
+  if (method?.startsWith('notifications/')) {
+    return { jsonrpc: '2.0', id, result: {} };
   }
 
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` } };
@@ -1331,21 +1335,20 @@ app.post(`${PREFIX}/register`, express.json(), (req, res) => {
   });
 });
 
-app.get(`${PREFIX}/authorize`, async (req, res) => {
-  const { client_id, redirect_uri, state, code_challenge } = req.query;
+app.get(`${PREFIX}/authorize`, (req, res) => {
+  const { client_id, client_secret, redirect_uri, state, code_challenge } = req.query;
   if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
 
-  // Direct path only — PIs are provisioned manually. client_secret (access key) arrives at /token.
-  if (client_id && PRIVATE_PI_RE.test(String(client_id).trim())) {
-    const code = randomUUID();
-    oauthCodes.set(code, { piPrivate: String(client_id).trim(), challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000, src: 'direct' });
-    const url = new URL(String(redirect_uri));
-    url.searchParams.set('code', code);
-    if (state) url.searchParams.set('state', String(state));
-    return res.redirect(url.toString());
-  }
-
-  return res.status(401).send('Access to π is by invitation. Visit pitr.network to get in touch.');
+  // No validation here — instant redirect so the browser closes before any UI renders.
+  // client_id = private PI, client_secret = access key. pirValidate runs at /token.
+  const piPrivate = String(client_id ?? '').trim();
+  const accessKey = String(client_secret ?? '').trim() || null;
+  const code = randomUUID();
+  oauthCodes.set(code, { piPrivate, accessKey, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000, src: 'direct' });
+  const url = new URL(String(redirect_uri));
+  url.searchParams.set('code', code);
+  if (state) url.searchParams.set('state', String(state));
+  return res.redirect(url.toString());
 });
 
 app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
@@ -1366,7 +1369,7 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
   if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
 
   const token = accessKey ? `${entry.piPrivate}|${accessKey}` : entry.piPrivate;
-  res.json({ access_token: token, token_type: 'Bearer' });
+  res.json({ access_token: token, token_type: 'Bearer', expires_in: 7776000 });
 });
 
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
@@ -1381,7 +1384,7 @@ app.get(`${PREFIX}/mcp`, (req, res) => {
     description: 'Open protocol for human × AI pairs. MCP-to-MCP, peer to peer.',
     url:         publicUrl,
     setup: {
-      message: "This is an MCP server. Add the config below to your AI assistant's MCP config file and restart. Then type 'connect to π' — your agent will call set to commission your pair and receive your private π.",
+      message: "This is an MCP server. Add the config below to your AI assistant's MCP config file and restart. Then type 'connect to π' — your agent will call pi to commission your pair and receive your private π.",
       config: {
         mcpServers: {
           pi: {
@@ -1393,7 +1396,7 @@ app.get(`${PREFIX}/mcp`, (req, res) => {
       steps: [
         'Add the config above to your MCP config file (see config_locations below)',
         'Restart your AI assistant',
-        "Type 'connect to π' — your agent will call set, commission your pair, and issue your private π",
+        "Type 'connect to π' — your agent will call pi, commission your pair, and issue your private π",
         'Add your private π to the X-Pi-Private header in your config (no space after colon)',
         "Restart once more — you're on the network. Type 'connect to π' every session to boot in.",
       ],
@@ -1439,7 +1442,7 @@ td:first-child{color:#6b8f71;white-space:nowrap;padding-right:20px}
 <h1>π — Pairing Intelligence</h1>
 <p class="sub">MCP server &nbsp;·&nbsp; ${publicUrl}</p>
 <h2>This is an MCP server</h2>
-<p>Add the config below to your AI assistant's MCP config file, restart, then call <code>set</code> to commission your pair.</p>
+<p>Add the config below to your AI assistant's MCP config file, restart, then call <code>pi</code> to commission your pair.</p>
 <h2>Config</h2>
 <pre>${cfg}</pre>
 <h2>Steps</h2>
