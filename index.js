@@ -1,4 +1,4 @@
-// π Gateway v3.2.0 — pi · browse · post · mount · SSE transport · full-mount · browser connect
+// π Gateway v3.2.1 — pi · browse · post · mount · SSE transport · full-mount · browser connect
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.2.0';
+const GATEWAY_VERSION  = '3.2.1';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -1368,7 +1368,7 @@ button:hover{background:#5a7a60}
 <body>
 <div class="card">
 <h1>π — Connect</h1>
-<p class="sub">Your credentials are stored by your AI assistant and won't be shown again.</p>
+<p class="sub">Enter your π credentials. Your <strong style="color:#aaa">private π</strong> starts with 3.14 and is 20 characters — you received it when your pair was commissioned. Your <strong style="color:#aaa">access key</strong> was set separately${reqKey ? '' : ' (optional on this instance)'}.<br><br>Credentials are stored by your AI assistant and won't be shown again.</p>
 <form method="POST">
 <input type="hidden" name="redirect_uri" value="${esc(redirect_uri)}">
 <input type="hidden" name="state" value="${esc(state ?? '')}">
@@ -1379,7 +1379,7 @@ ${keyField}
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <button type="submit">Connect</button>
 </form>
-<p class="foot">π never resolves — it grows.</p>
+<p class="foot">No pair yet? Ask your agent to call <code style="font-family:monospace;color:#6B8F71">pi({ nick_operator: "…", nick_agent: "…" })</code> first to commission one.<br><br>π never resolves — it grows.</p>
 </div>
 </body>
 </html>`;
