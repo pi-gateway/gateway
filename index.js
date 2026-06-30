@@ -1,4 +1,4 @@
-// π Gateway v3.1.0 — pi · browse · post · mount · SSE transport · full-mount · browser connect
+// π Gateway v3.2.0 — pi · browse · post · mount · SSE transport · full-mount · browser connect
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.1.0';
+const GATEWAY_VERSION  = '3.2.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -1549,7 +1549,7 @@ app.post(`${PREFIX}/mcp`, async (req, res) => {
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  if (!piPrivate && body.method !== 'initialize' && !body.method?.startsWith('notifications/')) {
+  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
@@ -1597,7 +1597,7 @@ app.post(`${PREFIX}/messages`, async (req, res) => {
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  if (!piPrivate && body.method !== 'initialize' && !body.method?.startsWith('notifications/')) {
+  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
