@@ -1,4 +1,4 @@
-// π Gateway v3.2.2 — pi · browse · post · mount · SSE transport · full-mount · browser connect
+// π Gateway v3.2.3 — pi · browse · post · mount · SSE transport · full-mount · browser connect
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.2.2';
+const GATEWAY_VERSION  = '3.2.3';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -797,16 +797,26 @@ async function toolEnter(piPrivate, publicPi, args) {
       signal: AbortSignal.timeout(8000),
     });
 
-    await fetch(targetUrl, fetchOpts(JSON.stringify({
+    const initRes = await fetch(targetUrl, fetchOpts(JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'initialize',
       params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pi-gateway', version: GATEWAY_VERSION } },
     })));
+    if (!initRes.ok) {
+      return fail(`${targetUrl} responded but doesn't look like an MCP server (HTTP ${initRes.status} on initialize).`);
+    }
 
     const toolsRes = await fetch(targetUrl, fetchOpts(
       JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     ));
+    if (!toolsRes.ok) {
+      return fail(`${targetUrl} responded but doesn't look like an MCP server (HTTP ${toolsRes.status} on tools/list).`);
+    }
 
-    const tools = toolsRes.ok ? ((await toolsRes.json())?.result?.tools ?? []) : [];
+    const toolsJson = await toolsRes.json();
+    if (toolsJson?.error) {
+      return fail(`${targetUrl} returned an error: ${toolsJson.error.message ?? 'unknown error'}`);
+    }
+    const tools = toolsJson?.result?.tools ?? [];
     const now   = new Date().toISOString();
 
     await Promise.all([
