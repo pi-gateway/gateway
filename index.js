@@ -1,4 +1,4 @@
-// π Gateway v3.2.1 — pi · browse · post · mount · SSE transport · full-mount · browser connect
+// π Gateway v3.2.2 — pi · browse · post · mount · SSE transport · full-mount · browser connect
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.2.1';
+const GATEWAY_VERSION  = '3.2.2';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -485,7 +485,7 @@ async function toolSet(piPrivate, args, accessKey) {
     }
 
     if (isFullMount) {
-      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, 'pi', args);
+      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, 'pi', args, accessKey);
       const homeMcpData   = JSON.parse(homeMcpResult.content[0].text);
       if (!homeMcpData.error) return homeMcpResult;
     }
@@ -841,7 +841,7 @@ async function toolEnter(piPrivate, publicPi, args) {
 
 // ── Proxy to entered MCP ──────────────────────────────────────────────────────
 
-async function proxyToEntered(piPrivate, publicPi, toolName, args) {
+async function proxyToEntered(piPrivate, publicPi, toolName, args, accessKey) {
   const { rows: [session] } = await pool.query(
     'SELECT connected_url, connected_name FROM mcp_sessions WHERE public_pi = $1',
     [publicPi]
@@ -852,7 +852,7 @@ async function proxyToEntered(piPrivate, publicPi, toolName, args) {
   try {
     const r = await fetch(session.connected_url, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate, ...(accessKey ? { 'X-Pi-Access-Key': accessKey } : {}) },
       body:    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: toolName, arguments: args } }),
     });
     if (!r.ok) return fail(`Call to ${session.connected_name} failed (${r.status})`);
@@ -1008,13 +1008,13 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           FOUR_VERBS.every(n => (fmSession?.connected_tools ?? []).some(t => t.name === n));
 
         if (isFullMount) {
-          result = await proxyToEntered(piPrivate, publicPi, toolName, args);
+          result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
         } else {
           switch (toolName) {
             case 'browse': result = await toolBrowse(piPrivate, publicPi, args); break;
             case 'post':   result = await toolPost(piPrivate, publicPi, args);   break;
             case 'mount':  result = await toolEnter(piPrivate, publicPi, args);  break;
-            default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args);
+            default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
           }
         }
       }
