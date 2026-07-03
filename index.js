@@ -894,7 +894,7 @@ const BASE_TOOLS = [
         cc_public_pi:  { type: 'string', description: 'π address to CC on all incoming messages.' },
         personality:   { type: 'string', description: 'Agent personality text.' },
         behaviors:     { type: 'object', description: 'Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.' },
-        home_mcp:       { type: 'string', description: 'Your preferred home MCP URL.' },
+        home_mcp:       { type: 'string', description: 'EXPERIMENTAL - use with caution. Auto-mounts this URL at every boot, replacing the base tool set with the live tools of the target server. Known to shift a connector identity mid-session in a way that can confuse external MCP clients (e.g. Claude Desktop connectors). Prefer calling mount explicitly, post-boot, instead.' },
         gateway_mcp:    { type: 'string', description: 'Your gateway MCP URL (updated in PIR).' },
         set_access_key: { type: 'string', description: 'Security key for this pair. When set, connections without it are rejected. Provide a value to set or replace; omit to leave unchanged; clear to remove.' },
       },
@@ -984,7 +984,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
               signal:  AbortSignal.timeout(5000),
             });
             tools = liveRes.ok ? ((await liveRes.json())?.result?.tools ?? savedTools) : savedTools;
-          } catch {
+          } catch (e) {
             tools = savedTools;
           }
         } else {
