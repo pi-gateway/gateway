@@ -1485,7 +1485,7 @@ app.post(`${PREFIX}/mcp`, async (req, res) => {
 
 // ── SSE transport ─────────────────────────────────────────────────────────────
 
-app.get(`${PREFIX}/sse`, (req, res) => {
+function handleSse(req, res) {
   const publicUrl   = process.env.GATEWAY_PUBLIC_URL ?? selfUrl();
   const messagesUrl = `${publicUrl}/messages`;
 
@@ -1509,7 +1509,15 @@ app.get(`${PREFIX}/sse`, (req, res) => {
     clearInterval(ping);
     if (publicPi) sseClients.delete(publicPi);
   });
-});
+}
+
+// GET on the bare MCP endpoint (same URL as POST) opens an SSE stream too - the modern
+// Streamable HTTP transport expects this. Previously fell through to a plain 404 since
+// the old GET landing page was removed - a stronger negative signal than a working
+// stream. Reuses the same handler as /sse below.
+app.get(`${PREFIX}`, handleSse);
+
+app.get(`${PREFIX}/sse`, handleSse);
 
 app.post(`${PREFIX}/messages`, async (req, res) => {
   let piPrivate = req.headers['x-pi-private'] ?? null;
