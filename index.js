@@ -1480,12 +1480,14 @@ app.post(`${PREFIX}/mcp`, async (req, res) => {
   if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
+  console.log(`[DIAG-DESKTOP] ${new Date().toISOString()} method=${body.method} ua=${JSON.stringify(req.headers['user-agent'] ?? null)} hasPiPrivate=${!!piPrivate} piPublic=${piPrivate ? piPrivate.substring(0,14) : null}`);
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
 // ── SSE transport ─────────────────────────────────────────────────────────────
 
 function handleSse(req, res) {
+  console.log(`[DIAG-DESKTOP-SSE] ${new Date().toISOString()} ua=${JSON.stringify(req.headers['user-agent'] ?? null)} hasPiPrivate=${!!req.headers['x-pi-private']} piPublic=${req.headers['x-pi-private'] ? String(req.headers['x-pi-private']).substring(0,14) : null}`);
   const publicUrl   = process.env.GATEWAY_PUBLIC_URL ?? selfUrl();
   const messagesUrl = `${publicUrl}/messages`;
 
