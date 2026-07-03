@@ -1045,20 +1045,6 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
 
 app.use(express.json());
 
-// TEMP DIAGNOSTIC — remove after Claude Desktop OAuth debugging (2026-07-03)
-app.use((req, res, next) => {
-  const rpcMethod = req.body?.method || null;
-  const toolName  = req.body?.params?.name || null;
-  console.log('[DIAG]', new Date().toISOString(), req.method, req.originalUrl,
-    'rpc=' + rpcMethod, 'tool=' + toolName,
-    'auth=' + (req.headers['authorization'] ? req.headers['authorization'].slice(0,20)+'...' : 'none'),
-    'x-pi-private=' + (req.headers['x-pi-private'] ? 'present' : 'none'),
-    'ua=' + (req.headers['user-agent'] || 'none'));
-  const origJson = res.json.bind(res);
-  res.json = (body) => { console.log('[DIAG-RESP]', new Date().toISOString(), 'status=' + res.statusCode, JSON.stringify(body).slice(0,200)); return origJson(body); };
-  next();
-});
-
 app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
