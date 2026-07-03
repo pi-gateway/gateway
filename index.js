@@ -1,4 +1,4 @@
-// π Gateway v3.2.3 — pi · browse · post · mount · SSE transport · full-mount · browser connect
+// π Gateway v3.3.0 — pi · browse · post · mount · SSE transport · full-mount — no auth gate (matches autobot/Saga tools-list model)
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -15,7 +15,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.2.3';
+const GATEWAY_VERSION  = '3.3.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -23,7 +23,6 @@ const PRIVATE_PI_RE = /^3\.14\d{18}$/;
 const PUBLIC_PI_RE  = /^3\.14\d{10}$/;
 const DEFAULT_ADMIN = '3.147185839309';
 
-const oauthCodes = new Map(); // code → { piPrivate, challenge, expires, src }
 const sseClients = new Map(); // publicPi → SSE res
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1320,139 +1319,6 @@ button:hover,a.btn:hover{background:#7EAB85}
 
 const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 
-app.get(`${PREFIX}/.well-known/oauth-authorization-server`, (req, res) => {
-  const base = selfUrl();
-  res.json({
-    issuer:                                base,
-    authorization_endpoint:                `${base}/authorize`,
-    token_endpoint:                        `${base}/token`,
-    registration_endpoint:                 `${base}/register`,
-    response_types_supported:              ['code'],
-    grant_types_supported:                 ['authorization_code'],
-    code_challenge_methods_supported:      ['S256'],
-    token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
-  });
-});
-
-app.post(`${PREFIX}/register`, express.json(), (req, res) => {
-  res.status(201).json({
-    client_id:                  randomUUID(),
-    client_id_issued_at:        Math.floor(Date.now() / 1000),
-    redirect_uris:              req.body?.redirect_uris ?? [],
-    grant_types:                ['authorization_code'],
-    response_types:             ['code'],
-    token_endpoint_auth_method: 'none',
-  });
-});
-
-function connectPage(redirect_uri, state, code_challenge, error = null) {
-  const reqKey = process.env.REQUIRE_ACCESS_KEY !== 'false';
-  const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-  const keyField = reqKey
-    ? `<div class="label-row"><label>Access key</label></div>
-       <input type="password" name="access_key" placeholder="access key" autocomplete="off" required>`
-    : `<div class="label-row"><label>Access key</label><span class="opt">optional</span></div>
-       <input type="password" name="access_key" placeholder="access key (if set)" autocomplete="off">`;
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Connect — π</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;background:#1A1A18;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
-.card{background:#232321;border:1px solid rgba(107,143,113,0.18);border-radius:6px;padding:2rem;max-width:360px;width:100%}
-h1{color:#fff;font-size:1.05rem;font-weight:600;margin-bottom:.35rem}
-.sub{color:#666;font-size:.82rem;margin-bottom:1.6rem;line-height:1.5}
-.label-row{display:flex;align-items:center;gap:6px;margin-top:1rem;margin-bottom:.3rem}
-label{font-size:.78rem;font-weight:600;color:#aaa}
-.opt{font-size:.74rem;color:#555}
-input{width:100%;padding:.5rem .75rem;background:#111;border:1px solid #2a2a28;border-radius:3px;color:#ccc;font-size:.88rem;font-family:monospace}
-input:focus{outline:none;border-color:#6B8F71}
-button{display:block;width:100%;margin-top:1.5rem;padding:.65rem;background:#6B8F71;color:#fff;border:none;border-radius:3px;font-size:.85rem;font-weight:600;cursor:pointer;letter-spacing:.03em}
-button:hover{background:#5a7a60}
-.err{color:#e07070;font-size:.82rem;margin-top:.8rem}
-.foot{color:rgba(255,255,255,.18);font-size:.75rem;margin-top:1.6rem;text-align:center}
-</style>
-</head>
-<body>
-<div class="card">
-<h1>π — Connect</h1>
-<p class="sub">Enter your π credentials. Your <strong style="color:#aaa">private π</strong> starts with 3.14 and is 20 characters — you received it when your pair was commissioned. Your <strong style="color:#aaa">access key</strong> was set separately${reqKey ? '' : ' (optional on this instance)'}.<br><br>Credentials are stored by your AI assistant and won't be shown again.</p>
-<form method="POST">
-<input type="hidden" name="redirect_uri" value="${esc(redirect_uri)}">
-<input type="hidden" name="state" value="${esc(state ?? '')}">
-<input type="hidden" name="code_challenge" value="${esc(code_challenge ?? '')}">
-<div class="label-row"><label>Private π</label></div>
-<input type="password" name="pi_key" placeholder="3.14…" autocomplete="current-password" required>
-${keyField}
-${error ? `<p class="err">${esc(error)}</p>` : ''}
-<button type="submit">Connect</button>
-</form>
-<p class="foot">No pair yet? Ask your agent to call <code style="font-family:monospace;color:#6B8F71">pi({ nick_operator: "…", nick_agent: "…" })</code> first to commission one.<br><br>π never resolves — it grows.</p>
-</div>
-</body>
-</html>`;
-}
-
-app.get(`${PREFIX}/authorize`, (req, res) => {
-  const { redirect_uri, state, code_challenge } = req.query;
-  if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(connectPage(redirect_uri, state, code_challenge));
-});
-
-app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
-  const { pi_key, access_key, redirect_uri, state, code_challenge } = req.body ?? {};
-  if (!pi_key || !redirect_uri) return res.status(400).send('Missing required fields');
-
-  const piPrivate = pi_key.trim();
-  const accessKey = access_key?.trim() || null;
-  const reqKey    = process.env.REQUIRE_ACCESS_KEY !== 'false';
-
-  const sendError = msg => {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(connectPage(redirect_uri, state, code_challenge, msg));
-  };
-
-  if (!PRIVATE_PI_RE.test(piPrivate))
-    return sendError("That doesn't look like a valid private π. It starts with 3.14 followed by 18 digits.");
-  if (reqKey && !accessKey)
-    return sendError('Access key required for this instance.');
-
-  const validated = await pirValidate(piPrivate, accessKey || undefined);
-  if (!validated?.valid)
-    return sendError('Credentials not recognised. Check your private π and access key.');
-
-  const code = randomUUID();
-  oauthCodes.set(code, { piPrivate, accessKey, challenge: String(code_challenge ?? ''), expires: Date.now() + 5 * 60_000, src: 'form' });
-  const url = new URL(String(redirect_uri));
-  url.searchParams.set('code', code);
-  if (state) url.searchParams.set('state', String(state));
-  res.redirect(url.toString());
-});
-
-app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
-  const { grant_type, code, code_verifier, client_secret } = req.body ?? {};
-  if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
-
-  const entry = oauthCodes.get(code);
-  if (!entry || Date.now() > entry.expires) { oauthCodes.delete(code); return res.status(400).json({ error: 'invalid_grant' }); }
-
-  const expected = createHash('sha256').update(code_verifier ?? '').digest('base64url');
-  if (expected !== entry.challenge) { oauthCodes.delete(code); return res.status(400).json({ error: 'invalid_grant' }); }
-  oauthCodes.delete(code);
-
-  // Access key: from client_secret (direct/Advanced Settings path) or from form submission
-  const accessKey = client_secret?.trim() || entry.accessKey || null;
-
-  const validated = await pirValidate(entry.piPrivate, accessKey);
-  if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
-
-  const token = accessKey ? `${entry.piPrivate}|${accessKey}` : entry.piPrivate;
-  res.json({ access_token: token, token_type: 'Bearer', expires_in: 7776000 });
-});
-
 // ── MCP endpoint ──────────────────────────────────────────────────────────────
 
 app.post(`${PREFIX}/mcp`, async (req, res) => {
@@ -1469,9 +1335,6 @@ app.post(`${PREFIX}/mcp`, async (req, res) => {
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
-    return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
-  }
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
@@ -1517,9 +1380,6 @@ app.post(`${PREFIX}/messages`, async (req, res) => {
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
-    return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
-  }
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
