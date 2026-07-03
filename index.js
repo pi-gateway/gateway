@@ -890,7 +890,7 @@ const BASE_TOOLS = [
         behaviors:     { type: 'object', description: 'Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.' },
         home_mcp:       { type: 'string', description: 'Your preferred home MCP URL.' },
         gateway_mcp:    { type: 'string', description: 'Your gateway MCP URL (updated in PIR).' },
-        set_access_key: { description: 'Security key for this pair. When set, connections without it are rejected. Provide a value to set or replace; omit to leave unchanged; clear to remove.' },
+        set_access_key: { type: 'string', description: 'Security key for this pair. When set, connections without it are rejected. Provide a value to set or replace; omit to leave unchanged; clear to remove.' },
       },
     },
   },
@@ -950,7 +950,6 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
         capabilities:    { tools: { listChanged: false } },
         serverInfo:      { name: 'pi-gateway', version: GATEWAY_VERSION },
         instructions:    "IMPORTANT: If your environment uses deferred tool schemas (e.g. claude.ai), first call ToolSearch with query 'pi browse post mount' to load all π tool schemas. Then call 'pi' immediately before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
-        nextStep:        'Load tool schemas if needed (ToolSearch: "pi browse post mount"), then call pi.',
       },
     };
   }
@@ -1045,6 +1044,21 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 app.use(express.json());
+
+// TEMP DIAGNOSTIC — remove after Claude Desktop OAuth debugging (2026-07-03)
+app.use((req, res, next) => {
+  const rpcMethod = req.body?.method || null;
+  const toolName  = req.body?.params?.name || null;
+  console.log('[DIAG]', new Date().toISOString(), req.method, req.originalUrl,
+    'rpc=' + rpcMethod, 'tool=' + toolName,
+    'auth=' + (req.headers['authorization'] ? req.headers['authorization'].slice(0,20)+'...' : 'none'),
+    'x-pi-private=' + (req.headers['x-pi-private'] ? 'present' : 'none'),
+    'ua=' + (req.headers['user-agent'] || 'none'));
+  const origJson = res.json.bind(res);
+  res.json = (body) => { console.log('[DIAG-RESP]', new Date().toISOString(), 'status=' + res.statusCode, JSON.stringify(body).slice(0,200)); return origJson(body); };
+  next();
+});
+
 app.use(express.urlencoded({ extended: true }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
