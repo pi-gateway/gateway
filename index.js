@@ -1287,6 +1287,7 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
 
 const oauthCard = (title, body) => `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90' font-family='Georgia,serif' fill='%236B8F71'%3E%CF%80%3C/text%3E%3C/svg%3E">
 <title>${title}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1357,6 +1358,7 @@ function connectPage(redirect_uri, state, code_challenge, error = null) {
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90' font-family='Georgia,serif' fill='%236B8F71'%3E%CF%80%3C/text%3E%3C/svg%3E">
 <title>Connect — π</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
