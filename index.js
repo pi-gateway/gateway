@@ -563,18 +563,24 @@ async function toolBrowse(piPrivate, publicPi, args) {
   }
 
   if (target === 'servers') {
-    const [pir, { rows: history }] = await Promise.all([
+    const [pir, { rows: [session] }] = await Promise.all([
       pirBrowseRegistry(limit),
       pool.query(
-        'SELECT url, name, tools, accessed_at FROM mcp_history WHERE public_pi = $1 ORDER BY accessed_at DESC LIMIT 20',
+        'SELECT connected_url, connected_name, connected_tools FROM mcp_sessions WHERE public_pi = $1',
         [publicPi]
       ),
     ]);
+    // entered reflects the single currently-active mount only (mcp_sessions.connected_url) —
+    // never a history dump. A server you exited, or whose shape changed since you mounted it,
+    // will not appear here; call mount() again to get a live, current tool list.
+    const entered = session?.connected_url
+      ? [{ url: session.connected_url, name: session.connected_name, tools: session.connected_tools }]
+      : [];
     return ok({
       ...base,
       current_server: { url: selfUrl(), note: 'You are already connected here — this is your active gateway.' },
-      registry: pir.results ?? [],
-      entered:  history,
+      registry: (pir.results ?? []).map(r => ({ ...r, note: 'Registry listing only — not directly callable. Call mount(url) to connect and use these tools.' })),
+      entered,
     });
   }
 
