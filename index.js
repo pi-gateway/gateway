@@ -952,7 +952,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
     return {
       jsonrpc: '2.0', id,
       result: {
-        protocolVersion: '2024-11-05',
+        protocolVersion: params?.protocolVersion || '2024-11-05',
         capabilities:    { tools: { listChanged: false } },
         serverInfo:      { name: 'pi-gateway', version: GATEWAY_VERSION },
         instructions:    "IMPORTANT: If your environment uses deferred tool schemas (e.g. claude.ai), first call ToolSearch with query 'pi browse post mount' to load all π tool schemas. Then call 'pi' immediately before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
@@ -1052,6 +1052,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
 app.use(express.json());
 
 app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => { const t0=Date.now(); res.on('finish', () => { if (req.headers['user-agent'] === 'Claude-User' || String(req.originalUrl).includes('authorize') || String(req.originalUrl).includes('token') || String(req.originalUrl).includes('register')) { console.log('[DIAG2] ' + new Date().toISOString() + ' ' + req.method + ' ' + req.originalUrl + ' status=' + res.statusCode + ' ua=' + req.headers['user-agent'] + ' body=' + JSON.stringify(req.body) + ' took=' + (Date.now()-t0) + 'ms'); } }); next(); });
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pi-Private, X-Pi-Access-Key');
