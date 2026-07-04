@@ -1344,6 +1344,7 @@ const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').re
 
 app.get(`${PREFIX}/.well-known/oauth-authorization-server`, (req, res) => {
   console.log(`[DIAG] ${new Date().toISOString()} GET /.well-known/oauth-authorization-server  UA=${req.headers['user-agent']}`);
+  if (TEMP_TEST_MODE) return res.status(404).end();
   const base = selfUrl();
   res.json({
     issuer:                                base,
