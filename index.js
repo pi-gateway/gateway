@@ -943,6 +943,14 @@ const BASE_TOOLS = [
   },
 ];
 
+// TEMP: isolating connector tool-visibility bug (July 4 2026). Revert by deleting this block + the two hooks below.
+const TEMP_TEST_MODE = true;
+const TEST_TOOLS = [{
+  name: 'test',
+  description: 'Temporary diagnostic tool. No auth required. Returns a static response.',
+  inputSchema: { type: 'object', properties: {} },
+}];
+
 // ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
 async function handleJsonRpc(piPrivate, body, accessKey) {
@@ -961,6 +969,9 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   }
 
   if (method === 'tools/list') {
+    if (TEMP_TEST_MODE) {
+      return { jsonrpc: '2.0', id, result: { tools: TEST_TOOLS } };
+    }
     let tools = [...BASE_TOOLS];
     if (piPrivate && PRIVATE_PI_RE.test(piPrivate)) {
       const publicPi = toPublicPi(piPrivate);
@@ -1001,6 +1012,10 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   if (method === 'tools/call') {
     const toolName = params?.name;
     const args     = params?.arguments ?? {};
+
+    if (TEMP_TEST_MODE && toolName === 'test') {
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } };
+    }
 
     try {
       let result;
