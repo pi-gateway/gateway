@@ -943,14 +943,6 @@ const BASE_TOOLS = [
   },
 ];
 
-// TEMP: isolating connector tool-visibility bug (July 4 2026). Revert by deleting this block + the two hooks below.
-const TEMP_TEST_MODE = true;
-const TEST_TOOLS = [{
-  name: 'test',
-  description: 'Temporary diagnostic tool. No auth required. Returns a static response.',
-  inputSchema: { type: 'object', properties: {} },
-}];
-
 // ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
 async function handleJsonRpc(piPrivate, body, accessKey) {
@@ -969,9 +961,6 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   }
 
   if (method === 'tools/list') {
-    if (TEMP_TEST_MODE) {
-      return { jsonrpc: '2.0', id, result: { tools: TEST_TOOLS } };
-    }
     let tools = [...BASE_TOOLS];
     if (piPrivate && PRIVATE_PI_RE.test(piPrivate)) {
       const publicPi = toPublicPi(piPrivate);
@@ -1012,10 +1001,6 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   if (method === 'tools/call') {
     const toolName = params?.name;
     const args     = params?.arguments ?? {};
-
-    if (TEMP_TEST_MODE && toolName === 'test') {
-      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } };
-    }
 
     try {
       let result;
@@ -1343,8 +1328,6 @@ button:hover,a.btn:hover{background:#7EAB85}
 const esc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 
 app.get(`${PREFIX}/.well-known/oauth-authorization-server`, (req, res) => {
-  console.log(`[DIAG] ${new Date().toISOString()} GET /.well-known/oauth-authorization-server  UA=${req.headers['user-agent']}`);
-  if (TEMP_TEST_MODE) return res.status(404).end();
   const base = selfUrl();
   res.json({
     issuer:                                base,
@@ -1359,7 +1342,6 @@ app.get(`${PREFIX}/.well-known/oauth-authorization-server`, (req, res) => {
 });
 
 app.post(`${PREFIX}/register`, express.json(), (req, res) => {
-  console.log(`[DIAG] ${new Date().toISOString()} POST /register  body=${JSON.stringify(req.body)}`);
   res.status(201).json({
     client_id:                  randomUUID(),
     client_id_issued_at:        Math.floor(Date.now() / 1000),
@@ -1422,7 +1404,6 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
 }
 
 app.get(`${PREFIX}/authorize`, (req, res) => {
-  console.log(`[DIAG] ${new Date().toISOString()} GET /authorize  query=${JSON.stringify(req.query)}`);
   const { redirect_uri, state, code_challenge } = req.query;
   if (!redirect_uri) return res.status(400).send('Missing redirect_uri');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -1430,7 +1411,6 @@ app.get(`${PREFIX}/authorize`, (req, res) => {
 });
 
 app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
-  console.log(`[DIAG] ${new Date().toISOString()} POST /authorize  hasPiKey=${!!(req.body?.pi_key)} hasAccessKey=${!!(req.body?.access_key)}`);
   const { pi_key, access_key, redirect_uri, state, code_challenge } = req.body ?? {};
   if (!pi_key || !redirect_uri) return res.status(400).send('Missing required fields');
 
@@ -1461,7 +1441,6 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
 });
 
 app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
-  console.log(`[DIAG] ${new Date().toISOString()} POST /token  grant_type=${req.body?.grant_type} hasClientSecret=${!!(req.body?.client_secret)}`);
   const { grant_type, code, code_verifier, client_secret } = req.body ?? {};
   if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
 
@@ -1497,9 +1476,8 @@ app.post(`${PREFIX}/mcp`, async (req, res) => {
     }
   }
   const body = req.body;
-  console.log("[DIAG] " + new Date().toISOString() + " POST /mcp method=" + body.method + " toolName=" + (body.params && body.params.name) + " hasPiPrivate=" + !!piPrivate);
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  if (!piPrivate && !TEMP_TEST_MODE && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
+  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
@@ -1508,7 +1486,6 @@ app.post(`${PREFIX}/mcp`, async (req, res) => {
 // ── SSE transport ─────────────────────────────────────────────────────────────
 
 function handleSse(req, res) {
-  console.log(`[DIAG] ${new Date().toISOString()} GET SSE  path=${req.path}  hasPiPrivate=${!!(req.headers['x-pi-private'])}`);
   const publicUrl   = process.env.GATEWAY_PUBLIC_URL ?? selfUrl();
   const messagesUrl = `${publicUrl}/messages`;
 
@@ -1556,7 +1533,7 @@ app.post(`${PREFIX}/messages`, async (req, res) => {
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  if (!piPrivate && !TEMP_TEST_MODE && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
+  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
