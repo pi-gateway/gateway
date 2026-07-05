@@ -234,6 +234,52 @@ async function deliverToGateway(payload, target) {
   }
 }
 
+// ── Message-home resolution (home_mcp vs gateway_mcp) ───────────────────────────────────
+// home_mcp is a secondary auto-mount, not a change of "where you connect from" (that's
+// gateway_mcp, and it should never drift just because a call got proxied elsewhere). If
+// home_mcp is a full π peer (all 4 base verbs present), that's where the pair's real
+// session/toolset lives, so messages should land there. If it's just an accessory tool
+// (e.g. autobot - no base toolset, auto-mounted on top of gateway_mcp's own tools),
+// messages stay at gateway_mcp since the accessory has nowhere to store them.
+
+// A live anonymous probe of home_mcp can't work in general - a private/admin-gated peer
+// (like pi-dev) won't reveal its real tool list to an unauthenticated caller, so an outside
+// sender can never verify full-peer status that way. Instead, trust the local mcp_sessions
+// cache, which was populated by the recipient's own legitimate boot (with their own real
+// credentials) the last time they connected - exactly the same data Gateway already trusts
+// for its own tools/list responses.
+async function resolveMessageHome(target) {
+  if (!target.home_mcp) return target.gateway_mcp;
+  const { rows: [session] } = await pool.query(
+    'SELECT connected_url, connected_tools FROM mcp_sessions WHERE public_pi = $1',
+    [target.public_pi]
+  );
+  const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
+  const isFullPeer = session?.connected_url === target.home_mcp &&
+    FOUR_VERBS.every(n => (session?.connected_tools ?? []).some(t => t.name === n));
+  return isFullPeer ? target.home_mcp : target.gateway_mcp;
+}
+
+async function deliverToUrl(payload, url) {
+  if (!url) return false;
+  const deliverUrl = url.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
+  try {
+    const r = await fetch(deliverUrl, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      console.error(`[deliver-home] ${deliverUrl} → ${r.status}: ${body}`);
+    }
+    return r.ok;
+  } catch (e) {
+    console.error(`[deliver-home] ${deliverUrl} → error: ${e}`);
+    return false;
+  }
+}
+
 // ── fireUrl ───────────────────────────────────────────────────────────────────
 
 async function fireUrl(url, content, content_type, publicPi, postId) {
@@ -318,14 +364,19 @@ async function toolSet(piPrivate, args, accessKey) {
   // Config updates
   const pirKeys     = ['nick_operator', 'nick_agent', 'personality', 'behaviors', 'home_mcp', 'gateway_mcp'];
   const localUpdates = {};
-  const pirUpdates  = { gateway_mcp: selfUrl() };
+  // gateway_mcp is "where you connect from" - only defaulted on true first-time registration
+  // (no existing value), never overwritten just because a call happens to be handled by a
+  // different server (e.g. a home_mcp full-mount proxy). Explicit args.gateway_mcp still wins.
+  const existing    = await pirLookup(publicPi);
+  const pirUpdates  = {};
+  if (!existing?.gateway_mcp) pirUpdates.gateway_mcp = selfUrl();
 
   for (const key of pirKeys) {
     if (args[key] !== undefined) pirUpdates[key] = args[key];
   }
   if (args.cc_public_pi !== undefined) localUpdates.cc_public_pi = args.cc_public_pi;
 
-  await pirUpdate(piPrivate, pirUpdates);
+  if (Object.keys(pirUpdates).length) await pirUpdate(piPrivate, pirUpdates);
 
   const validated = await pirValidate(piPrivate, accessKey);
   if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
@@ -730,16 +781,17 @@ async function toolPost(piPrivate, publicPi, args) {
     post_id: post?.id,
   };
 
+  const messageHomeUrl   = await resolveMessageHome(target);
   const normalize        = u => u.replace(/\/$/, '');
-  const recipientIsLocal = !target.gateway_mcp || normalize(target.gateway_mcp) === normalize(selfUrl());
+  const recipientIsLocal = !messageHomeUrl || normalize(messageHomeUrl) === normalize(selfUrl());
   let delivered;
   if (recipientIsLocal) {
     const { rows: [recipientSession] } = await pool.query(
       'SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
     );
-    delivered = recipientSession ? true : await deliverToGateway(payload, target);
+    delivered = recipientSession ? true : await deliverToUrl(payload, messageHomeUrl);
   } else {
-    delivered = await deliverToGateway(payload, target);
+    delivered = await deliverToUrl(payload, messageHomeUrl);
   }
 
   await upsertContact(piPrivate, { public_pi: target.public_pi });
