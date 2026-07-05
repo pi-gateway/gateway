@@ -1478,6 +1478,7 @@ app.post(`${PREFIX}/mcp`, async (req, res) => {
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
+  if (body.method?.startsWith('notifications/')) return res.status(202).end();
   if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
@@ -1534,6 +1535,7 @@ app.post(`${PREFIX}/messages`, async (req, res) => {
   }
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
+  if (body.method?.startsWith('notifications/')) return res.status(202).end();
   if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
