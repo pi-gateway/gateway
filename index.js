@@ -1,4 +1,4 @@
-// π Gateway v3.2.3 — ping · browse · post · mount · SSE transport · full-mount · browser connect
+// π Gateway v3.3.0 — ping · browse · post · mount · SSE transport · auto-mount · browser connect
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -17,7 +17,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.2.3';
+const GATEWAY_VERSION  = '3.3.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 
@@ -157,7 +157,7 @@ function buildHelp() {
   return `## Tool reference
 
 ping
-  Commission a new pair or boot an existing one. Config: personality, behaviors, home_mcp, gateway_mcp.
+  Commission a new pair or boot an existing one. Config: personality, behaviors, auto_mount, gateway_mcp.
   Behaviors (all on by default): auto_log · session_end_log · start_with_last_log · auto_check_activity
   Call ping with no args to see current config.
 
@@ -245,32 +245,6 @@ async function deliverToGateway(payload, target) {
   }
 }
 
-// ── Message-home resolution (home_mcp vs gateway_mcp) ───────────────────────────────────
-// home_mcp is a secondary auto-mount, not a change of "where you connect from" (that's
-// gateway_mcp, and it should never drift just because a call got proxied elsewhere). If
-// home_mcp is a full π peer (all 4 base verbs present), that's where the pair's real
-// session/toolset lives, so messages should land there. If it's just an accessory tool
-// (e.g. autobot - no base toolset, auto-mounted on top of gateway_mcp's own tools),
-// messages stay at gateway_mcp since the accessory has nowhere to store them.
-
-// A live anonymous probe of home_mcp can't work in general - a private/admin-gated peer
-// (like pi-dev) won't reveal its real tool list to an unauthenticated caller, so an outside
-// sender can never verify full-peer status that way. Instead, trust the local mcp_sessions
-// cache, which was populated by the recipient's own legitimate boot (with their own real
-// credentials) the last time they connected - exactly the same data Gateway already trusts
-// for its own tools/list responses.
-async function resolveMessageHome(target) {
-  if (!target.home_mcp) return target.gateway_mcp;
-  const { rows: [session] } = await pool.query(
-    'SELECT connected_url, connected_tools FROM mcp_sessions WHERE public_pi = $1',
-    [target.public_pi]
-  );
-  const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
-  const isFullPeer = session?.connected_url === target.home_mcp &&
-    FOUR_VERBS.every(n => (session?.connected_tools ?? []).some(t => t.name === n));
-  return isFullPeer ? target.home_mcp : target.gateway_mcp;
-}
-
 async function deliverToUrl(payload, url) {
   if (!url) return false;
   const deliverUrl = url.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
@@ -319,6 +293,64 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
 }
 
 // ── Tool: ping ────────────────────────────────────────────────────────────────
+
+// ── Mount merge (dedup by tool name) ───────────────────────────────────────────
+// Auto-mount and manual mount share one rule: a newly-attached server's tools never
+// override the base toolset or a tool already claimed by another mount - colliding
+// names are dropped, not overridden. This replaces the old isFullMount full-identity
+// takeover entirely: a mounted server exposing all 4 base verbs just has those 4 names
+// excluded as duplicates, like any other conflict. gateway_mcp (this server) always owns
+// ping/browse/post/mount - nothing mounted can ever replace them or relocate this session.
+function mergeMount(connectedMounts, url, name, tools) {
+  const taken = new Set([
+    ...BASE_TOOLS.map(t => t.name),
+    ...connectedMounts.flatMap(m => (m.tools ?? []).map(t => t.name)),
+  ]);
+  const kept    = tools.filter(t => !taken.has(t.name));
+  const dropped = tools.filter(t => taken.has(t.name)).map(t => t.name);
+  return { mount: { url, name, tools: kept }, dropped };
+}
+
+async function fetchMountTools(targetUrl, piPrivate, accessKey) {
+  const mountHeaders = { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate };
+  if (accessKey) mountHeaders['X-Pi-Access-Key'] = accessKey;
+  const fetchOpts = body => ({ method: 'POST', headers: mountHeaders, body, signal: AbortSignal.timeout(8000) });
+  const initRes = await safeFetch(targetUrl, fetchOpts(JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pi-gateway', version: GATEWAY_VERSION } },
+  })));
+  if (!initRes.ok) throw new Error(`${targetUrl} responded but doesn't look like an MCP server (HTTP ${initRes.status} on initialize).`);
+  const toolsRes = await safeFetch(targetUrl, fetchOpts(
+    JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+  ));
+  if (!toolsRes.ok) throw new Error(`${targetUrl} responded but doesn't look like an MCP server (HTTP ${toolsRes.status} on tools/list).`);
+  const toolsJson = await toolsRes.json();
+  if (toolsJson?.error) throw new Error(`${targetUrl} returned an error: ${toolsJson.error.message ?? 'unknown error'}`);
+  return toolsJson?.result?.tools ?? [];
+}
+
+// Auto-mounts any auto_mount URLs not yet in connected_mounts. Pure tool-extension:
+// never touches identity/routing, only adds tools that don't collide with anything.
+async function autoMountAll(piPrivate, publicPi, accessKey, autoMountUrls, connectedMounts) {
+  const results = [];
+  let mounts = [...connectedMounts];
+  for (const url of autoMountUrls) {
+    if (mounts.some(m => m.url === url)) continue;
+    try {
+      const tools = await fetchMountTools(url, piPrivate, accessKey);
+      const { mount, dropped } = mergeMount(mounts, url, url, tools);
+      mounts = [...mounts, mount];
+      results.push({ url, tools_added: mount.tools.length, tools_dropped: dropped });
+    } catch (e) {
+      results.push({ url, error: String(e.message ?? e) });
+    }
+  }
+  if (results.length) {
+    await pool.query('UPDATE mcp_sessions SET connected_mounts = $1::jsonb WHERE public_pi = $2',
+      [JSON.stringify(mounts), publicPi]);
+  }
+  return { mounts, results };
+}
 
 async function toolSet(piPrivate, args, accessKey) {
   if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
@@ -373,11 +405,12 @@ async function toolSet(piPrivate, args, accessKey) {
   const publicPi = toPublicPi(piPrivate);
 
   // Config updates
-  const pirKeys     = ['nick_operator', 'nick_agent', 'personality', 'behaviors', 'home_mcp', 'gateway_mcp'];
+  const pirKeys     = ['nick_operator', 'nick_agent', 'personality', 'behaviors', 'gateway_mcp'];
   const localUpdates = {};
-  // gateway_mcp is "where you connect from" - only defaulted on true first-time registration
-  // (no existing value), never overwritten just because a call happens to be handled by a
-  // different server (e.g. a home_mcp full-mount proxy). Explicit args.gateway_mcp still wins.
+  // gateway_mcp is the one fixed anchor - "where you connect from", where routing and
+  // storage always live. Only defaulted on true first-time registration (no existing
+  // value), never overwritten just because a call happens to be handled by a different
+  // server. Explicit args.gateway_mcp still wins.
   const existing    = await pirLookup(publicPi);
   const pirUpdates  = {};
   if (!existing?.gateway_mcp) pirUpdates.gateway_mcp = selfUrl();
@@ -385,6 +418,7 @@ async function toolSet(piPrivate, args, accessKey) {
   for (const key of pirKeys) {
     if (args[key] !== undefined) pirUpdates[key] = args[key];
   }
+  if (args.auto_mount   !== undefined) pirUpdates.auto_mount   = Array.isArray(args.auto_mount) ? args.auto_mount : [args.auto_mount];
   if (args.cc_public_pi !== undefined) localUpdates.cc_public_pi = args.cc_public_pi;
 
   if (Object.keys(pirUpdates).length) await pirUpdate(piPrivate, pirUpdates);
@@ -393,23 +427,24 @@ async function toolSet(piPrivate, args, accessKey) {
   if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
   if (!passesLocalKeyPolicy(validated)) return fail('Access key required for this instance.');
 
-  // Upsert session — core fields + home_mcp cache from PIR; personality/behaviors now live in PIR
-  const upsertCols = ['public_pi', 'nick_agent', 'nick_operator', 'last_seen', 'home_mcp'];
-  const upsertVals = [publicPi, validated.nick_agent, validated.nick_operator, new Date().toISOString(), validated.home_mcp ?? null];
+  // Upsert session — core fields; personality/behaviors/auto_mount now live in PIR
+  const upsertCols = ['public_pi', 'nick_agent', 'nick_operator', 'last_seen'];
+  const upsertVals = [publicPi, validated.nick_agent, validated.nick_operator, new Date().toISOString()];
 
   if (localUpdates.cc_public_pi !== undefined) {
     upsertCols.push('cc_public_pi');
     upsertVals.push(localUpdates.cc_public_pi);
   }
 
-  // connected_url reset to null on every set() — fresh session, no stale enter state
-  upsertCols.push('connected_url', 'connected_name', 'connected_tools');
-  upsertVals.push(null, null, null);
+  // connected_mounts reset to empty on every set() — fresh session, no stale mount state.
+  // auto_mount URLs get freshly re-attached right after, below.
+  upsertCols.push('connected_mounts');
+  upsertVals.push('[]');
 
   const placeholders = upsertVals.map((_, i) => `$${i + 1}`).join(', ');
   const updateSets   = upsertCols
     .filter(c => c !== 'public_pi')
-    .map(c => `${c} = EXCLUDED.${c}`)
+    .map(c => c === 'connected_mounts' ? `${c} = EXCLUDED.${c}::jsonb` : `${c} = EXCLUDED.${c}`)
     .join(', ');
 
   await pool.query(
@@ -418,15 +453,15 @@ async function toolSet(piPrivate, args, accessKey) {
     upsertVals
   );
 
-  // Load session state (personality/behaviors/home_mcp now come from PIR via validated)
+  // Load session state (personality/behaviors/auto_mount now come from PIR via validated)
   const { rows: [session] } = await pool.query(`
-    SELECT connected_url, connected_name, connected_tools, cc_public_pi
+    SELECT connected_mounts, cc_public_pi
     FROM mcp_sessions WHERE public_pi = $1
   `, [publicPi]);
 
   const behaviors   = validated.behaviors  ?? { auto_log: true, session_end_log: true, start_with_last_log: true, auto_check_activity: true };
   const personality = validated.personality ?? null;
-  const homeMcp     = validated.home_mcp    ?? null;
+  const autoMountUrls = validated.auto_mount ?? [];
   const now = new Date().toISOString();
 
   // Scheduled posts due now
@@ -485,7 +520,7 @@ async function toolSet(piPrivate, args, accessKey) {
     status:   'connected',
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
     spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-    config:   { personality, behaviors, home_mcp: homeMcp },
+    config:   { personality, behaviors, auto_mount: autoMountUrls },
     help:     buildHelp(),
     ...(isNewPair ? {
       onboarding: {
@@ -520,38 +555,13 @@ async function toolSet(piPrivate, args, accessKey) {
     response.last_log = lastLog ?? null;
   }
 
-  // home_mcp: auto-enter + full-mount detection (homeMcp from PIR validate)
-  if (homeMcp) {
-    const alreadyMounted = session?.connected_url === homeMcp;
-    const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
-    let isFullMount = false;
-
-    if (!alreadyMounted) {
-      const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp }, accessKey);
-      const enteredData = JSON.parse(entered.content[0].text);
-      const serverTools = enteredData.tools?.server ?? [];
-      isFullMount = FOUR_VERBS.every(n => serverTools.some(t => t.name === n));
-      if (!isFullMount) response.home_mcp_entered = entered;
-    } else {
-      const savedTools = session?.connected_tools ?? [];
-      isFullMount = FOUR_VERBS.every(n => savedTools.some(t => t.name === n));
-      if (!isFullMount) {
-        const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp }, accessKey);
-        const enteredData = JSON.parse(entered.content[0].text);
-        const freshTools  = enteredData.tools?.server ?? [];
-        isFullMount = FOUR_VERBS.every(n => freshTools.some(t => t.name === n));
-        if (!isFullMount) {
-          response.home_mcp  = homeMcp;
-          response.connected = session?.connected_name ?? session?.connected_url;
-        }
-      }
-    }
-
-    if (isFullMount) {
-      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, 'ping', args, accessKey);
-      const homeMcpData   = JSON.parse(homeMcpResult.content[0].text);
-      if (!homeMcpData.error) return homeMcpResult;
-    }
+  // auto_mount: pure tool-extension, never identity-relocation. Attaches any configured
+  // URLs (connected_mounts was just reset above, so this is always a fresh attach this
+  // boot); colliding tool names are dropped, not overridden.
+  if (autoMountUrls.length) {
+    const { mounts, results } = await autoMountAll(piPrivate, publicPi, accessKey, autoMountUrls, session?.connected_mounts ?? []);
+    if (results.length) response.auto_mounted = results;
+    response.mounted = mounts.map(m => ({ url: m.url, name: m.name, tool_count: m.tools?.length ?? 0 }));
   }
 
   // Gateway docs pointer
@@ -629,16 +639,14 @@ async function toolBrowse(piPrivate, publicPi, args) {
     const [pir, { rows: [session] }] = await Promise.all([
       pirBrowseRegistry(limit),
       pool.query(
-        'SELECT connected_url, connected_name, connected_tools FROM mcp_sessions WHERE public_pi = $1',
+        'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1',
         [publicPi]
       ),
     ]);
-    // entered reflects the single currently-active mount only (mcp_sessions.connected_url) —
+    // entered reflects the currently-active mounts only (mcp_sessions.connected_mounts) —
     // never a history dump. A server you exited, or whose shape changed since you mounted it,
     // will not appear here; call mount() again to get a live, current tool list.
-    const entered = session?.connected_url
-      ? [{ url: session.connected_url, name: session.connected_name, tools: session.connected_tools }]
-      : [];
+    const entered = session?.connected_mounts ?? [];
     return ok({
       ...base,
       current_server: { url: selfUrl(), note: 'You are already connected here — this is your active gateway.' },
@@ -793,17 +801,16 @@ async function toolPost(piPrivate, publicPi, args) {
     post_id: post?.id,
   };
 
-  const messageHomeUrl   = await resolveMessageHome(target);
   const normalize        = u => u.replace(/\/$/, '');
-  const recipientIsLocal = !messageHomeUrl || normalize(messageHomeUrl) === normalize(selfUrl());
+  const recipientIsLocal = !target.gateway_mcp || normalize(target.gateway_mcp) === normalize(selfUrl());
   let delivered;
   if (recipientIsLocal) {
     const { rows: [recipientSession] } = await pool.query(
       'SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
     );
-    delivered = recipientSession ? true : await deliverToUrl(payload, messageHomeUrl);
+    delivered = recipientSession ? true : await deliverToUrl(payload, target.gateway_mcp);
   } else {
-    delivered = await deliverToUrl(payload, messageHomeUrl);
+    delivered = await deliverToUrl(payload, target.gateway_mcp);
   }
 
   await upsertContact(piPrivate, { public_pi: target.public_pi });
@@ -839,62 +846,33 @@ async function toolEnter(piPrivate, publicPi, args, accessKey) {
     return ok({ status: 'already_here', note: "You're already connected to this server. Your current tools are all you need." });
   }
 
-  // Toggle-exit: entering an already-connected non-home MCP exits it and returns to home
-  // home_mcp is managed by set, not enter — never toggle-exit it
   const { rows: [cur] } = await pool.query(
-    'SELECT connected_url, home_mcp FROM mcp_sessions WHERE public_pi = $1',
+    'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1',
     [publicPi]
   );
-  if (cur?.connected_url && cur.connected_url === targetUrl && cur.connected_url !== cur.home_mcp) {
-    if (cur.home_mcp) {
-      const exitResult = await toolEnter(piPrivate, publicPi, { url: cur.home_mcp }, accessKey);
-      notifyToolsChanged(publicPi);
-      return exitResult;
-    }
+  const currentMounts = cur?.connected_mounts ?? [];
+
+  // Toggle-exit: entering an already-mounted MCP disconnects just that one mount
+  if (currentMounts.some(m => m.url === targetUrl)) {
+    const remaining = currentMounts.filter(m => m.url !== targetUrl);
     await pool.query(
-      'UPDATE mcp_sessions SET connected_url = NULL, connected_name = NULL, connected_tools = NULL WHERE public_pi = $1',
-      [publicPi]
+      'UPDATE mcp_sessions SET connected_mounts = $1::jsonb WHERE public_pi = $2',
+      [JSON.stringify(remaining), publicPi]
     );
     notifyToolsChanged(publicPi);
     return ok({ status: 'exited', note: `Disconnected from ${targetName}.` });
   }
 
   try {
-    const mountHeaders = { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate };
-    if (accessKey) mountHeaders['X-Pi-Access-Key'] = accessKey;
-    const fetchOpts = body => ({
-      method:  'POST',
-      headers: mountHeaders,
-      body,
-      signal: AbortSignal.timeout(8000),
-    });
-
-    const initRes = await safeFetch(targetUrl, fetchOpts(JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'initialize',
-      params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pi-gateway', version: GATEWAY_VERSION } },
-    })));
-    if (!initRes.ok) {
-      return fail(`${targetUrl} responded but doesn't look like an MCP server (HTTP ${initRes.status} on initialize).`);
-    }
-
-    const toolsRes = await safeFetch(targetUrl, fetchOpts(
-      JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
-    ));
-    if (!toolsRes.ok) {
-      return fail(`${targetUrl} responded but doesn't look like an MCP server (HTTP ${toolsRes.status} on tools/list).`);
-    }
-
-    const toolsJson = await toolsRes.json();
-    if (toolsJson?.error) {
-      return fail(`${targetUrl} returned an error: ${toolsJson.error.message ?? 'unknown error'}`);
-    }
-    const tools = toolsJson?.result?.tools ?? [];
+    const tools = await fetchMountTools(targetUrl, piPrivate, accessKey);
     const now   = new Date().toISOString();
+    const { mount, dropped } = mergeMount(currentMounts, targetUrl, targetName, tools);
+    const mounts = [...currentMounts, mount];
 
     await Promise.all([
       pool.query(
-        'UPDATE mcp_sessions SET connected_url = $1, connected_name = $2, connected_tools = $3, last_seen = $4 WHERE public_pi = $5',
-        [targetUrl, targetName, JSON.stringify(tools), now, publicPi]
+        'UPDATE mcp_sessions SET connected_mounts = $1::jsonb, last_seen = $2 WHERE public_pi = $3',
+        [JSON.stringify(mounts), now, publicPi]
       ),
       pool.query(`
         INSERT INTO mcp_history (public_pi, url, name, tools, accessed_at)
@@ -905,19 +883,20 @@ async function toolEnter(piPrivate, publicPi, args, accessKey) {
     ]);
 
     const gatewayTools = BASE_TOOLS.map(t => ({ name: t.name, description: t.description }));
-    const serverTools  = tools.map(t => ({ name: t.name, description: `[${targetName}] ${t.description ?? ''}`.trim() }));
+    const serverTools  = mount.tools.map(t => ({ name: t.name, description: `[${targetName}] ${t.description ?? ''}`.trim() }));
 
     notifyToolsChanged(publicPi);
     return ok({
       entered: targetName,
       url:     targetUrl,
       tools:   { gateway: gatewayTools, server: serverTools },
-      note: tools.length
-        ? `${tools.length} tools from ${targetName} now available. Call them directly by name.`
-        : `Connected to ${targetName}. No tools listed.`,
+      ...(dropped.length ? { dropped_tools: dropped, dropped_note: 'These names collide with your base toolset or another mount — call the existing one instead.' } : {}),
+      note: mount.tools.length
+        ? `${mount.tools.length} tools from ${targetName} now available. Call them directly by name.`
+        : `Connected to ${targetName}. No new tools available.`,
     });
   } catch (e) {
-    return fail(`Could not connect to ${targetUrl}.`, String(e));
+    return fail(`Could not connect to ${targetUrl}.`, String(e.message ?? e));
   }
 }
 
@@ -925,23 +904,25 @@ async function toolEnter(piPrivate, publicPi, args, accessKey) {
 
 async function proxyToEntered(piPrivate, publicPi, toolName, args, accessKey) {
   const { rows: [session] } = await pool.query(
-    'SELECT connected_url, connected_name FROM mcp_sessions WHERE public_pi = $1',
+    'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1',
     [publicPi]
   );
-  if (!session?.connected_url) {
+  const mounts = session?.connected_mounts ?? [];
+  const owner  = mounts.find(m => (m.tools ?? []).some(t => t.name === toolName));
+  if (!owner) {
     return fail(`Unknown tool "${toolName}". Call mount to connect to an MCP first.`);
   }
   try {
-    const r = await fetch(session.connected_url, {
+    const r = await fetch(owner.url, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate, ...(accessKey ? { 'X-Pi-Access-Key': accessKey } : {}) },
       body:    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: toolName, arguments: args } }),
     });
-    if (!r.ok) return fail(`Call to ${session.connected_name} failed (${r.status})`);
+    if (!r.ok) return fail(`Call to ${owner.name} failed (${r.status})`);
     const result = await r.json();
     return result.error ? fail(result.error.message) : result.result;
   } catch (e) {
-    return fail(`Call to ${session.connected_name} failed.`, String(e));
+    return fail(`Call to ${owner.name} failed.`, String(e));
   }
 }
 
@@ -950,7 +931,7 @@ async function proxyToEntered(piPrivate, publicPi, toolName, args, accessKey) {
 const BASE_TOOLS = [
   {
     name: 'ping',
-    description: "Boot a session. Call ping every session start to load your config, spec, and activity. Supply private_pi if not yet configured in headers. Also updates config: personality, behaviors, home_mcp, gateway_mcp, access key.",
+    description: "Boot a session. Call ping every session start to load your config, spec, and activity. Supply private_pi if not yet configured in headers. Also updates config: personality, behaviors, auto_mount, gateway_mcp, access key.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -960,7 +941,7 @@ const BASE_TOOLS = [
         cc_public_pi:  { type: 'string', description: 'π address to CC on all incoming messages.' },
         personality:   { type: 'string', description: 'Agent personality text.' },
         behaviors:     { type: 'object', description: 'Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.' },
-        home_mcp:       { type: 'string', description: 'EXPERIMENTAL - use with caution. Auto-mounts this URL at every boot, replacing the base tool set with the live tools of the target server. Known to shift a connector identity mid-session in a way that can confuse external MCP clients (e.g. Claude Desktop connectors). Prefer calling mount explicitly, post-boot, instead.' },
+        auto_mount:     { type: 'array', items: { type: 'string' }, description: 'MCP URLs to auto-mount at every boot for extra tools. Pure tool-extension - never replaces your base toolset (ping/browse/post/mount always come from gateway_mcp). Any tool name that collides with your base toolset or another mount is dropped, not overridden.' },
         gateway_mcp:    { type: 'string', description: 'Your gateway MCP URL (updated in PIR).' },
         set_access_key: { type: 'string', description: 'Security key for this pair. When set, connections without it are rejected. Provide a value to set or replace; omit to leave unchanged; clear to remove.' },
       },
@@ -1032,34 +1013,32 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
     if (listValidated?.valid && passesLocalKeyPolicy(listValidated)) {
       const publicPi = listValidated.public_pi;
       const { rows: [session] } = await pool.query(
-        'SELECT connected_tools, connected_name, home_mcp, connected_url FROM mcp_sessions WHERE public_pi = $1',
+        'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1',
         [publicPi]
       );
-      if (session?.connected_tools?.length) {
-        const savedTools = session.connected_tools;
-        const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
-        const isFullMount = session.home_mcp &&
-          session.connected_url === session.home_mcp &&
-          FOUR_VERBS.every(n => savedTools.some(t => t.name === n));
-        if (isFullMount) {
-          // Fetch live tools from home MCP so mounted sub-servers (e.g. autobot) are included
-          try {
-            const liveRes = await fetch(session.home_mcp, {
-              method:  'POST',
-              headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
-              body:    JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} }),
-              signal:  AbortSignal.timeout(5000),
-            });
-            tools = liveRes.ok ? ((await liveRes.json())?.result?.tools ?? savedTools) : savedTools;
-          } catch (e) {
-            tools = savedTools;
-          }
-        } else {
-          tools = [...tools, ...savedTools.map(t => ({
-            ...t,
-            description: `[${session.connected_name}] ${t.description ?? ''}`.trim(),
-          }))];
-        }
+      const mounts = session?.connected_mounts ?? [];
+      // gateway_mcp always owns ping/browse/post/mount, full stop - no mount, however many
+      // base verbs it exposes, ever replaces the base toolset (isFullMount removed entirely).
+      // Live-refetch each mount's tools rather than trusting the cached column indefinitely
+      // (found July 3, recurred July 5 - a stale cache kept showing tools weeks after they
+      // stopped being relevant). Dedup against everything already claimed so far.
+      for (const m of mounts) {
+        let liveTools = m.tools ?? [];
+        try {
+          const liveRes = await fetch(m.url, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+            body:    JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} }),
+            signal:  AbortSignal.timeout(5000),
+          });
+          if (liveRes.ok) liveTools = (await liveRes.json())?.result?.tools ?? liveTools;
+        } catch (e) { /* fall back to cached tools */ }
+        const taken = new Set(tools.map(t => t.name));
+        const kept  = liveTools.filter(t => !taken.has(t.name));
+        tools = [...tools, ...kept.map(t => ({
+          ...t,
+          description: `[${m.name}] ${t.description ?? ''}`.trim(),
+        }))];
       }
     }
     return { jsonrpc: '2.0', id, result: { tools } };
@@ -1081,24 +1060,13 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
         }
         const publicPi = validated.public_pi;
 
-        const { rows: [fmSession] } = await pool.query(
-          'SELECT home_mcp, connected_url, connected_tools FROM mcp_sessions WHERE public_pi = $1',
-          [publicPi]
-        );
-        const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
-        const isFullMount = fmSession?.home_mcp &&
-          fmSession?.connected_url === fmSession?.home_mcp &&
-          FOUR_VERBS.every(n => (fmSession?.connected_tools ?? []).some(t => t.name === n));
-
-        if (isFullMount) {
-          result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
-        } else {
-          switch (toolName) {
-            case 'browse': result = await toolBrowse(piPrivate, publicPi, args); break;
-            case 'post':   result = await toolPost(piPrivate, publicPi, args);   break;
-            case 'mount':  result = await toolEnter(piPrivate, publicPi, args, accessKey);  break;
-            default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
-          }
+        // gateway_mcp always owns these four verbs — no mount, however many base verbs
+        // it exposes, ever takes over dispatch (isFullMount removed entirely).
+        switch (toolName) {
+          case 'browse': result = await toolBrowse(piPrivate, publicPi, args); break;
+          case 'post':   result = await toolPost(piPrivate, publicPi, args);   break;
+          case 'mount':  result = await toolEnter(piPrivate, publicPi, args, accessKey);  break;
+          default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
         }
       }
 
