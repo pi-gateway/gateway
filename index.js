@@ -1,4 +1,4 @@
-// π Gateway v3.2.3 — pi · browse · post · mount · SSE transport · full-mount · browser connect
+// π Gateway v3.2.3 — ping · browse · post · mount · SSE transport · full-mount · browser connect
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -139,7 +139,7 @@ Your π address is ${publicPi}. Share this freely. Never share your private key.
 
 ## Your four tools
 
-pi      Commission, config, help. Call with no args to see current config and this reference.
+ping    Commission, config, help. Call with no args to see current config and this reference.
 browse  Read everything. Default: activity (unread inbox). Targets: activity · contacts · servers · history · files
 post    Write, send, share. Default recipient: self. Content: json (ephemeral) · md · svg · webp (permanent)
 mount   Connect to any MCP. Returns their tools. Call them directly after mounting.
@@ -148,7 +148,7 @@ mount   Connect to any MCP. Returns their tools. Call them directly after mounti
 Recipient names are plain values — no sigils. "Paulo", "3.14718583930991", "contacts", "all".
 
 ## Session rhythm
-Call pi on every session start. Unread inbox is included in the pi response as "inbox" — no need to call browse on startup. Post to self (content_type md) at session end as a save point for next time.
+Call ping on every session start. Unread inbox is included in the ping response as "inbox" — no need to call browse on startup. Post to self (content_type md) at session end as a save point for next time.
 
 π never resolves — it grows.`;
 }
@@ -156,10 +156,10 @@ Call pi on every session start. Unread inbox is included in the pi response as "
 function buildHelp() {
   return `## Tool reference
 
-pi
+ping
   Commission a new pair or boot an existing one. Config: personality, behaviors, home_mcp, gateway_mcp.
   Behaviors (all on by default): auto_log · session_end_log · start_with_last_log · auto_check_activity
-  Call pi with no args to see current config.
+  Call ping with no args to see current config.
 
 browse
   Always returns: activity brief (unread/mentions) + your public π address.
@@ -265,7 +265,7 @@ async function resolveMessageHome(target) {
     'SELECT connected_url, connected_tools FROM mcp_sessions WHERE public_pi = $1',
     [target.public_pi]
   );
-  const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
+  const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
   const isFullPeer = session?.connected_url === target.home_mcp &&
     FOUR_VERBS.every(n => (session?.connected_tools ?? []).some(t => t.name === n));
   return isFullPeer ? target.home_mcp : target.gateway_mcp;
@@ -318,7 +318,7 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
   }
 }
 
-// ── Tool: pi ──────────────────────────────────────────────────────────────────
+// ── Tool: ping ────────────────────────────────────────────────────────────────
 
 async function toolSet(piPrivate, args, accessKey) {
   if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
@@ -339,7 +339,7 @@ async function toolSet(piPrivate, args, accessKey) {
         next_step: "Add your private π as the X-Pi-Private header in your MCP config, then restart your AI assistant.",
         config_example: {
           mcpServers: {
-            pi: {
+            ping: {
               command: 'npx',
               args: ['-y', 'mcp-remote', 'https://pitr.network/3.14', '--header', `X-Pi-Private:${private_pi}`],
             },
@@ -497,8 +497,8 @@ async function toolSet(piPrivate, args, accessKey) {
           { step: 3, q: "What do you call your agent?", param: "nick_agent", optional: "only if not agentic", note: "Required if agentic." },
           { step: 4, q: null, action: "Present public_pi (share freely) and private_pi (save now — not shown again)." },
         ],
-        agentic_call:  "pi({ nick_agent: 'YourAgentName' })",
-        hybrid_call:   "pi({ nick_operator: 'YourName', nick_agent: 'YourAgentName' })",
+        agentic_call:  "ping({ nick_agent: 'YourAgentName' })",
+        hybrid_call:   "ping({ nick_operator: 'YourName', nick_agent: 'YourAgentName' })",
       },
     } : {}),
   };
@@ -523,7 +523,7 @@ async function toolSet(piPrivate, args, accessKey) {
   // home_mcp: auto-enter + full-mount detection (homeMcp from PIR validate)
   if (homeMcp) {
     const alreadyMounted = session?.connected_url === homeMcp;
-    const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
+    const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
     let isFullMount = false;
 
     if (!alreadyMounted) {
@@ -548,7 +548,7 @@ async function toolSet(piPrivate, args, accessKey) {
     }
 
     if (isFullMount) {
-      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, 'pi', args, accessKey);
+      const homeMcpResult = await proxyToEntered(piPrivate, publicPi, 'ping', args, accessKey);
       const homeMcpData   = JSON.parse(homeMcpResult.content[0].text);
       if (!homeMcpData.error) return homeMcpResult;
     }
@@ -949,8 +949,8 @@ async function proxyToEntered(piPrivate, publicPi, toolName, args, accessKey) {
 
 const BASE_TOOLS = [
   {
-    name: 'pi',
-    description: "Boot a session. Call pi every session start to load your config, spec, and activity. Supply private_pi if not yet configured in headers. Also updates config: personality, behaviors, home_mcp, gateway_mcp, access key.",
+    name: 'ping',
+    description: "Boot a session. Call ping every session start to load your config, spec, and activity. Supply private_pi if not yet configured in headers. Also updates config: personality, behaviors, home_mcp, gateway_mcp, access key.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -1021,7 +1021,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
         protocolVersion: params?.protocolVersion || '2024-11-05',
         capabilities:    { tools: { listChanged: false } },
         serverInfo:      { name: 'pi-gateway', version: GATEWAY_VERSION },
-        instructions:    "IMPORTANT: If your environment uses deferred tool schemas (e.g. claude.ai), first call ToolSearch with query 'pi browse post mount' to load all π tool schemas. Then call 'pi' immediately before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
+        instructions:    "IMPORTANT: If your environment uses deferred tool schemas (e.g. claude.ai), first call ToolSearch with query 'ping browse post mount' to load all π tool schemas. Then call 'ping' immediately before responding to the user or using any other tools. This boots your session on the π network and loads your identity, last session log, and inbox.",
       },
     };
   }
@@ -1037,7 +1037,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
       );
       if (session?.connected_tools?.length) {
         const savedTools = session.connected_tools;
-        const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
+        const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
         const isFullMount = session.home_mcp &&
           session.connected_url === session.home_mcp &&
           FOUR_VERBS.every(n => savedTools.some(t => t.name === n));
@@ -1072,7 +1072,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
     try {
       let result;
 
-      if (toolName === 'pi') {
+      if (toolName === 'ping') {
         result = await toolSet(piPrivate, args, accessKey);
       } else {
         const validated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await pirValidate(piPrivate, accessKey) : null;
@@ -1085,7 +1085,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           'SELECT home_mcp, connected_url, connected_tools FROM mcp_sessions WHERE public_pi = $1',
           [publicPi]
         );
-        const FOUR_VERBS = ['pi', 'browse', 'post', 'mount'];
+        const FOUR_VERBS = ['ping', 'browse', 'post', 'mount'];
         const isFullMount = fmSession?.home_mcp &&
           fmSession?.connected_url === fmSession?.home_mcp &&
           FOUR_VERBS.every(n => (fmSession?.connected_tools ?? []).some(t => t.name === n));
@@ -1466,7 +1466,7 @@ ${keyField}
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <button type="submit">Connect</button>
 </form>
-<p class="foot">No pair yet? Ask your agent to call <code style="font-family:monospace;color:#6B8F71">pi({ nick_operator: "…", nick_agent: "…" })</code> first to commission one.<br><br>π never resolves — it grows.</p>
+<p class="foot">No pair yet? Ask your agent to call <code style="font-family:monospace;color:#6B8F71">ping({ nick_operator: "…", nick_agent: "…" })</code> first to commission one.<br><br>π never resolves — it grows.</p>
 </div>
 </body>
 </html>`;
