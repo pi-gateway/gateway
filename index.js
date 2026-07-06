@@ -85,6 +85,15 @@ async function pirValidate(piPrivate, accessKey) {
   return r.ok ? r.json() : null;
 }
 
+// This instance's own policy: require a verified access key regardless of whether PIR
+// (the neutral, federation-wide phonebook) would allow a keyless identity through.
+function accessKeyRequiredHere() {
+  return process.env.REQUIRE_ACCESS_KEY !== 'false';
+}
+function passesLocalKeyPolicy(validated) {
+  return !accessKeyRequiredHere() || validated?.access_key_verified === true;
+}
+
 async function pirLookup(publicPi) {
   const r = await fetch(`${PIR}/id?id=${encodeURIComponent(publicPi)}`);
   return r.ok ? r.json() : null;
@@ -380,6 +389,7 @@ async function toolSet(piPrivate, args, accessKey) {
 
   const validated = await pirValidate(piPrivate, accessKey);
   if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
+  if (!passesLocalKeyPolicy(validated)) return fail('Access key required for this instance.');
 
   // Upsert session — core fields + home_mcp cache from PIR; personality/behaviors now live in PIR
   const upsertCols = ['public_pi', 'nick_agent', 'nick_operator', 'last_seen', 'home_mcp'];
@@ -1015,7 +1025,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   if (method === 'tools/list') {
     let tools = [...BASE_TOOLS];
     const listValidated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await pirValidate(piPrivate, accessKey) : null;
-    if (listValidated?.valid) {
+    if (listValidated?.valid && passesLocalKeyPolicy(listValidated)) {
       const publicPi = listValidated.public_pi;
       const { rows: [session] } = await pool.query(
         'SELECT connected_tools, connected_name, home_mcp, connected_url FROM mcp_sessions WHERE public_pi = $1',
@@ -1062,7 +1072,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
         result = await toolSet(piPrivate, args, accessKey);
       } else {
         const validated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await pirValidate(piPrivate, accessKey) : null;
-        if (!validated?.valid) {
+        if (!validated?.valid || !passesLocalKeyPolicy(validated)) {
           return { jsonrpc: '2.0', id, result: noIdentity() };
         }
         const publicPi = validated.public_pi;
