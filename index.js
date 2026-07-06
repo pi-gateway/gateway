@@ -1014,8 +1014,9 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
 
   if (method === 'tools/list') {
     let tools = [...BASE_TOOLS];
-    if (piPrivate && PRIVATE_PI_RE.test(piPrivate)) {
-      const publicPi = toPublicPi(piPrivate);
+    const listValidated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await pirValidate(piPrivate, accessKey) : null;
+    if (listValidated?.valid) {
+      const publicPi = listValidated.public_pi;
       const { rows: [session] } = await pool.query(
         'SELECT connected_tools, connected_name, home_mcp, connected_url FROM mcp_sessions WHERE public_pi = $1',
         [publicPi]
@@ -1060,10 +1061,11 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
       if (toolName === 'pi') {
         result = await toolSet(piPrivate, args, accessKey);
       } else {
-        if (!piPrivate || !PRIVATE_PI_RE.test(piPrivate)) {
+        const validated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await pirValidate(piPrivate, accessKey) : null;
+        if (!validated?.valid) {
           return { jsonrpc: '2.0', id, result: noIdentity() };
         }
-        const publicPi = toPublicPi(piPrivate);
+        const publicPi = validated.public_pi;
 
         const { rows: [fmSession] } = await pool.query(
           'SELECT home_mcp, connected_url, connected_tools FROM mcp_sessions WHERE public_pi = $1',
