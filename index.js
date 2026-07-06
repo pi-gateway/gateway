@@ -527,7 +527,7 @@ async function toolSet(piPrivate, args, accessKey) {
     let isFullMount = false;
 
     if (!alreadyMounted) {
-      const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp });
+      const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp }, accessKey);
       const enteredData = JSON.parse(entered.content[0].text);
       const serverTools = enteredData.tools?.server ?? [];
       isFullMount = FOUR_VERBS.every(n => serverTools.some(t => t.name === n));
@@ -536,7 +536,7 @@ async function toolSet(piPrivate, args, accessKey) {
       const savedTools = session?.connected_tools ?? [];
       isFullMount = FOUR_VERBS.every(n => savedTools.some(t => t.name === n));
       if (!isFullMount) {
-        const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp });
+        const entered    = await toolEnter(piPrivate, publicPi, { url: homeMcp }, accessKey);
         const enteredData = JSON.parse(entered.content[0].text);
         const freshTools  = enteredData.tools?.server ?? [];
         isFullMount = FOUR_VERBS.every(n => freshTools.some(t => t.name === n));
@@ -815,7 +815,7 @@ async function toolPost(piPrivate, publicPi, args) {
 
 // ── Tool: mount ───────────────────────────────────────────────────────────────
 
-async function toolEnter(piPrivate, publicPi, args) {
+async function toolEnter(piPrivate, publicPi, args, accessKey) {
   let targetUrl  = null;
   let targetName = null;
 
@@ -847,7 +847,7 @@ async function toolEnter(piPrivate, publicPi, args) {
   );
   if (cur?.connected_url && cur.connected_url === targetUrl && cur.connected_url !== cur.home_mcp) {
     if (cur.home_mcp) {
-      const exitResult = await toolEnter(piPrivate, publicPi, { url: cur.home_mcp });
+      const exitResult = await toolEnter(piPrivate, publicPi, { url: cur.home_mcp }, accessKey);
       notifyToolsChanged(publicPi);
       return exitResult;
     }
@@ -860,9 +860,11 @@ async function toolEnter(piPrivate, publicPi, args) {
   }
 
   try {
+    const mountHeaders = { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate };
+    if (accessKey) mountHeaders['X-Pi-Access-Key'] = accessKey;
     const fetchOpts = body => ({
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+      headers: mountHeaders,
       body,
       signal: AbortSignal.timeout(8000),
     });
@@ -1094,7 +1096,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           switch (toolName) {
             case 'browse': result = await toolBrowse(piPrivate, publicPi, args); break;
             case 'post':   result = await toolPost(piPrivate, publicPi, args);   break;
-            case 'mount':  result = await toolEnter(piPrivate, publicPi, args);  break;
+            case 'mount':  result = await toolEnter(piPrivate, publicPi, args, accessKey);  break;
             default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
           }
         }
