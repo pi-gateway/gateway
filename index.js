@@ -12,6 +12,7 @@ import { safeFetch } from './ssrfGuard.js';
 const { Pool } = pg;
 const pool   = new Pool({ connectionString: process.env.GW_DB_URL });
 const app    = express();
+app.disable('x-powered-by');
 const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
