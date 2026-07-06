@@ -7,6 +7,7 @@ import fs      from 'fs';
 import path    from 'path';
 import { randomUUID, randomBytes, createHash } from 'crypto';
 import pg      from 'pg';
+import { safeFetch } from './ssrfGuard.js';
 
 const { Pool } = pg;
 const pool   = new Pool({ connectionString: process.env.GW_DB_URL });
@@ -294,7 +295,7 @@ async function deliverToUrl(payload, url) {
 async function fireUrl(url, content, content_type, publicPi, postId) {
   let errorMsg = null;
   try {
-    const res = await fetch(url, {
+    const res = await safeFetch(url, {
       method:  'POST',
       headers: { 'Content-Type': content_type === 'json' ? 'application/json' : 'text/plain' },
       body:    content,
@@ -865,7 +866,7 @@ async function toolEnter(piPrivate, publicPi, args) {
       signal: AbortSignal.timeout(8000),
     });
 
-    const initRes = await fetch(targetUrl, fetchOpts(JSON.stringify({
+    const initRes = await safeFetch(targetUrl, fetchOpts(JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'initialize',
       params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'pi-gateway', version: GATEWAY_VERSION } },
     })));
@@ -873,7 +874,7 @@ async function toolEnter(piPrivate, publicPi, args) {
       return fail(`${targetUrl} responded but doesn't look like an MCP server (HTTP ${initRes.status} on initialize).`);
     }
 
-    const toolsRes = await fetch(targetUrl, fetchOpts(
+    const toolsRes = await safeFetch(targetUrl, fetchOpts(
       JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     ));
     if (!toolsRes.ok) {
