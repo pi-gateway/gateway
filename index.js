@@ -173,7 +173,7 @@ mount   Connect to any MCP. Returns their tools. Call them directly after mounti
 Recipient names are plain values — no sigils. "Paulo", "3.14718583930991", "contacts", "all".
 
 ## Session rhythm
-Call ping on every session start. Unread inbox is included in the ping response as "inbox" — no need to call browse on startup. Post to self (content_type md) at session end as a save point for next time.
+Call ping on every session start. Unread inbox is included in the ping response as "inbox" — no need to call browse on startup. Post to self (content_type md, name starting with "log_" - e.g. log_20260709_topic.md) at session end as a save point for next time. The name prefix matters: start_with_last_log only finds posts named log_* - anything else (including no name at all) is invisible to it.
 
 π never resolves — it grows.`;
 }
