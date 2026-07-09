@@ -1,6 +1,4 @@
-// π Gateway v3.5.1 — ping · browse · post · mount · SSE transport · auto-mount · browser connect ·
-// Slack/email push notifications · boot-proxy (/3.14 open ping-only relay → /tools real, auth-gated server,
-// session-scoped boot gate via Mcp-Session-Id)
+// π Gateway v3.4.1 — ping · browse · post · mount · SSE transport · auto-mount · browser connect · Slack/email push notifications
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -19,7 +17,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.5.1';
+const GATEWAY_VERSION  = '3.4.1';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 const VAULT            = process.env.VAULT_URL ?? 'http://localhost:3151';
@@ -31,40 +29,6 @@ const DEFAULT_ADMIN = '3.147185839309';
 
 const oauthCodes = new Map(); // code → { piPrivate, challenge, expires, src }
 const sseClients = new Map(); // publicPi → SSE res
-
-// Boot-proxy session tracking (outer /3.14 only) — deliberately in-memory and keyed by
-// MCP transport session, not identity. An identity-keyed marker (tried first, see git
-// history) meant a second connection under the same credentials — a Claude Desktop
-// restart, a second chat window on a fresh connector reconnect — inherited "already
-// booted" from a connection it never itself made. Session-scoping ties the gate to the
-// actual connection lifecycle instead: a new Mcp-Session-Id means a real re-`ping` is
-// required, but a long-running session never expires mid-work from a timer, which was
-// the explicit thing to avoid (a wall-clock TTL would eventually kick someone off in the
-// middle of legitimate work for no reason a user could see).
-const bootedSessions = new Map(); // sessionId → last-touched timestamp (ms)
-const BOOTED_SESSION_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days — memory hygiene only, not a security boundary
-
-function resolveSessionId(req) {
-  return req.headers['mcp-session-id'] || req.query?.sessionId || null;
-}
-
-function hasBootedSession(sessionId) {
-  if (!sessionId) return false;
-  const touched = bootedSessions.get(sessionId);
-  if (touched === undefined) return false;
-  if (Date.now() - touched > BOOTED_SESSION_MAX_AGE) { bootedSessions.delete(sessionId); return false; }
-  return true;
-}
-
-function markBootedSession(sessionId) {
-  if (!sessionId) return;
-  bootedSessions.set(sessionId, Date.now());
-  // Opportunistic prune, piggybacked on writes rather than a standing timer.
-  if (bootedSessions.size > 500) {
-    const cutoff = Date.now() - BOOTED_SESSION_MAX_AGE;
-    for (const [id, t] of bootedSessions) if (t < cutoff) bootedSessions.delete(id);
-  }
-}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1136,43 +1100,38 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   }
 
   if (method === 'tools/list') {
-    // This endpoint (/tools, the real server) requires identity for tools/list itself now,
-    // not just tools/call — previously the base toolset was handed to anyone regardless of
-    // auth, only mount-merging was gated. /3.14 (outer) is the only surface allowed to be
-    // open; this one isn't, by design.
-    const listValidated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await validateWithKey(piPrivate, accessKey) : null;
-    if (!listValidated?.valid || !passesLocalKeyPolicy(listValidated)) {
-      return { jsonrpc: '2.0', id, result: { tools: [] } };
-    }
     let tools = [...BASE_TOOLS];
-    const publicPi = listValidated.public_pi;
-    const { rows: [session] } = await pool.query(
-      'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1',
-      [publicPi]
-    );
-    const mounts = session?.connected_mounts ?? [];
-    // gateway_mcp always owns ping/browse/post/mount, full stop - no mount, however many
-    // base verbs it exposes, ever replaces the base toolset (isFullMount removed entirely).
-    // Live-refetch each mount's tools rather than trusting the cached column indefinitely
-    // (found July 3, recurred July 5 - a stale cache kept showing tools weeks after they
-    // stopped being relevant). Dedup against everything already claimed so far.
-    for (const m of mounts) {
-      let liveTools = m.tools ?? [];
-      try {
-        const liveRes = await fetch(m.url, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
-          body:    JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} }),
-          signal:  AbortSignal.timeout(5000),
-        });
-        if (liveRes.ok) liveTools = (await liveRes.json())?.result?.tools ?? liveTools;
-      } catch (e) { /* fall back to cached tools */ }
-      const taken = new Set(tools.map(t => t.name));
-      const kept  = liveTools.filter(t => !taken.has(t.name));
-      tools = [...tools, ...kept.map(t => ({
-        ...t,
-        description: `[${m.name}] ${t.description ?? ''}`.trim(),
-      }))];
+    const listValidated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await validateWithKey(piPrivate, accessKey) : null;
+    if (listValidated?.valid && passesLocalKeyPolicy(listValidated)) {
+      const publicPi = listValidated.public_pi;
+      const { rows: [session] } = await pool.query(
+        'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1',
+        [publicPi]
+      );
+      const mounts = session?.connected_mounts ?? [];
+      // gateway_mcp always owns ping/browse/post/mount, full stop - no mount, however many
+      // base verbs it exposes, ever replaces the base toolset (isFullMount removed entirely).
+      // Live-refetch each mount's tools rather than trusting the cached column indefinitely
+      // (found July 3, recurred July 5 - a stale cache kept showing tools weeks after they
+      // stopped being relevant). Dedup against everything already claimed so far.
+      for (const m of mounts) {
+        let liveTools = m.tools ?? [];
+        try {
+          const liveRes = await fetch(m.url, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
+            body:    JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} }),
+            signal:  AbortSignal.timeout(5000),
+          });
+          if (liveRes.ok) liveTools = (await liveRes.json())?.result?.tools ?? liveTools;
+        } catch (e) { /* fall back to cached tools */ }
+        const taken = new Set(tools.map(t => t.name));
+        const kept  = liveTools.filter(t => !taken.has(t.name));
+        tools = [...tools, ...kept.map(t => ({
+          ...t,
+          description: `[${m.name}] ${t.description ?? ''}`.trim(),
+        }))];
+      }
     }
     return { jsonrpc: '2.0', id, result: { tools } };
   }
@@ -1214,135 +1173,6 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   }
 
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` } };
-}
-
-// ── Outer boot relay (bare /3.14) ───────────────────────────────────────────────
-//
-// /3.14 surfaces exactly one tool — ping — and requires no auth of its own, ever.
-// It runs zero boot logic itself: tools/call(ping) is a pure forward to /tools,
-// which owns identity/auth/spec/personality/mount/auto_mount, entirely unchanged.
-// This is what makes "call ping before anything else" a protocol-level guarantee
-// instead of the old compliance-based one (tools/list literally has nothing else
-// to call until a real boot has happened).
-//
-// The 401/OAuth-challenge check that used to live on this route has moved to
-// /tools — the browser credential window now fires on real-server access, not
-// on a bare, potentially credential-less first call.
-
-const PING_STUB = [BASE_TOOLS.find(t => t.name === 'ping')];
-
-// Bespoke to this handoff — deliberately NOT mergeMount. mergeMount (general-purpose
-// mount) drops anything colliding with an existing tool name, so a third party can
-// never shadow a base verb. Here we want the opposite: the freshly-relayed ping is
-// always the *real* tool the stub was standing in for, so it must win the collision.
-// Kept as a separate function on purpose — mergeMount's drop-on-collision behavior is
-// load-bearing for real third-party mounts and must never be touched by this path.
-function mergeBootMount(stubTools, realTools) {
-  const realNames = new Set(realTools.map(t => t.name));
-  const kept = stubTools.filter(t => !realNames.has(t.name));
-  return [...kept, ...realTools];
-}
-
-function innerHeaders(req) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (req.headers['x-pi-private'])    headers['X-Pi-Private']    = req.headers['x-pi-private'];
-  if (req.headers['x-pi-access-key']) headers['X-Pi-Access-Key'] = req.headers['x-pi-access-key'];
-  if (req.headers['authorization'])   headers['Authorization']   = req.headers['authorization'];
-  return headers;
-}
-
-// Loopback call to /tools — deliberately plain fetch, not safeFetch. safeFetch's SSRF
-// guard exists to block user-supplied mount URLs from reaching loopback/RFC1918
-// addresses; this target is a hardcoded, same-process URL, not user input, so the
-// guard doesn't apply here and would wrongly block this call if used.
-async function callInner(req, body) {
-  return fetch(`http://127.0.0.1:${PORT}${PREFIX}/tools`, {
-    method:  'POST',
-    headers: innerHeaders(req),
-    body:    JSON.stringify(body),
-    signal:  AbortSignal.timeout(15000),
-  });
-}
-
-async function handleOuter(req, res) {
-  let piPrivate = req.headers['x-pi-private'] ?? null;
-  let accessKey = req.headers['x-pi-access-key'] ?? null;
-  if (!piPrivate) {
-    const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
-      ? req.headers['authorization'].slice(7) : null;
-    if (bearer) {
-      const parts = bearer.split('|');
-      piPrivate = parts[0].trim() || null;
-      if (parts[1] && !accessKey) accessKey = parts[1].trim() || null;
-    }
-  }
-  const body = req.body;
-  if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  const { method, id, params } = body;
-  const sessionId = resolveSessionId(req);
-
-  if (method === 'initialize') {
-    // Mint a fresh session id for Streamable HTTP clients (returned as a response
-    // header per the MCP spec — the client is expected to echo it on every subsequent
-    // request). A real client restart/reconnect calls initialize again and gets a new
-    // one, which is exactly the boundary the boot gate below keys off.
-    const newSessionId = randomUUID();
-    res.set('Mcp-Session-Id', newSessionId);
-    return res.json({
-      jsonrpc: '2.0', id,
-      result: {
-        protocolVersion: params?.protocolVersion || '2024-11-05',
-        capabilities:    { tools: { listChanged: false } },
-        serverInfo:      { name: 'pi-gateway', version: GATEWAY_VERSION },
-        instructions:    "IMPORTANT: If your environment uses deferred tool schemas (e.g. claude.ai), first call ToolSearch with query 'ping' to load the ping tool schema. Then call 'ping' immediately before responding to the user or using any other tools. This forwards to the real π toolset, authenticating if needed, and boots your session — identity, last session log, and inbox.",
-      },
-    });
-  }
-
-  if (method?.startsWith('notifications/')) return res.status(202).end();
-
-  if (method === 'tools/list') {
-    if (hasBootedSession(sessionId)) {
-      try {
-        const innerRes = await callInner(req, { jsonrpc: '2.0', id: 98, method: 'tools/list', params: {} });
-        if (innerRes.ok) {
-          const innerJson = await innerRes.json();
-          return res.json({ jsonrpc: '2.0', id, result: { tools: mergeBootMount(PING_STUB, innerJson?.result?.tools ?? []) } });
-        }
-      } catch (e) { /* fall through to stub */ }
-    }
-    return res.json({ jsonrpc: '2.0', id, result: { tools: PING_STUB } });
-  }
-
-  if (method === 'tools/call') {
-    const toolName = params?.name;
-    const args     = params?.arguments ?? {};
-
-    if (toolName !== 'ping' && !hasBootedSession(sessionId)) {
-      return res.json({ jsonrpc: '2.0', id, result: fail(`"${toolName}" isn't available yet — call ping first.`) });
-    }
-
-    try {
-      const innerRes = await callInner(req, { jsonrpc: '2.0', id, method: 'tools/call', params: { name: toolName, arguments: args } });
-      if (innerRes.status === 401) {
-        res.status(401);
-        const www = innerRes.headers.get('www-authenticate');
-        if (www) res.set('WWW-Authenticate', www);
-        return res.json(await innerRes.json());
-      }
-      const innerJson = await innerRes.json();
-      if (toolName === 'ping' && innerRes.ok) {
-        markBootedSession(sessionId);
-        const validated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await validateWithKey(piPrivate, accessKey) : null;
-        if (validated?.valid && passesLocalKeyPolicy(validated)) notifyToolsChanged(validated.public_pi);
-      }
-      return res.json(innerJson);
-    } catch (e) {
-      return res.json({ jsonrpc: '2.0', id, result: fail('Could not reach the real toolset.', String(e.message ?? e)) });
-    }
-  }
-
-  return res.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` } });
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
@@ -1762,14 +1592,9 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
   res.json({ access_token: token, token_type: 'Bearer', expires_in: 7776000 });
 });
 
-// ── Real MCP endpoint (/tools — the inner, auth-required server) ───────────────
-//
-// Everything except initialize requires identity here — tools/list included, which
-// is new: previously the base toolset was visible to anyone regardless of auth, only
-// mount-merging was gated. This is what "can't be accessed directly, or it allows
-// tools to be used, without the auth in place" means in practice. This is also where
-// the OAuth 401/browser-credential-page challenge now fires, moved from bare /3.14.
-app.post(`${PREFIX}/tools`, async (req, res) => {
+// ── MCP endpoint ──────────────────────────────────────────────────────────────
+
+app.post(`${PREFIX}/mcp`, async (req, res) => {
   let piPrivate = req.headers['x-pi-private'] ?? null;
   let accessKey = req.headers['x-pi-access-key'] ?? null;
   if (!piPrivate) {
@@ -1784,28 +1609,17 @@ app.post(`${PREFIX}/tools`, async (req, res) => {
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   if (body.method?.startsWith('notifications/')) return res.status(202).end();
-  if (!piPrivate && body.method !== 'initialize') {
+  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
     return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
   }
   return res.json(await handleJsonRpc(piPrivate, body, accessKey));
 });
 
-// ── Outer boot relay (bare /3.14 — pitr.network/3.14) ───────────────────────────
-//
-// Open, unauthenticated, ping-only. See handleOuter above for the full mechanics.
-app.post(`${PREFIX}/mcp`, handleOuter);
-
 // ── SSE transport ─────────────────────────────────────────────────────────────
 
 function handleSse(req, res) {
   const publicUrl   = process.env.GATEWAY_PUBLIC_URL ?? selfUrl();
-  // Older SSE-transport clients have no Mcp-Session-Id header round-trip — the SSE
-  // connection itself is the real per-connection object, so the boot-proxy session id
-  // rides along in the messages endpoint URL instead. A fresh SSE connection (new tab,
-  // client restart) gets a fresh id the same way a fresh Streamable HTTP `initialize`
-  // does.
-  const sseSessionId = randomUUID();
-  const messagesUrl  = `${publicUrl}/messages?sessionId=${sseSessionId}`;
+  const messagesUrl = `${publicUrl}/messages`;
 
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1837,9 +1651,26 @@ app.get(`${PREFIX}`, handleSse);
 
 app.get(`${PREFIX}/sse`, handleSse);
 
-// Same outer relay as /mcp — this is the message-posting side of the older SSE
-// transport variant, reachable from the same bare /3.14 origin.
-app.post(`${PREFIX}/messages`, handleOuter);
+app.post(`${PREFIX}/messages`, async (req, res) => {
+  let piPrivate = req.headers['x-pi-private'] ?? null;
+  let accessKey = req.headers['x-pi-access-key'] ?? null;
+  if (!piPrivate) {
+    const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
+      ? req.headers['authorization'].slice(7) : null;
+    if (bearer) {
+      const parts = bearer.split('|');
+      piPrivate = parts[0].trim() || null;
+      if (parts[1] && !accessKey) accessKey = parts[1].trim() || null;
+    }
+  }
+  const body = req.body;
+  if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
+  if (body.method?.startsWith('notifications/')) return res.status(202).end();
+  if (!piPrivate && body.method !== 'initialize' && body.method !== 'tools/list' && !body.method?.startsWith('notifications/')) {
+    return res.status(401).set('WWW-Authenticate', `Bearer as_uri="${selfUrl()}/.well-known/oauth-authorization-server"`).json({ error: 'Unauthorized' });
+  }
+  return res.json(await handleJsonRpc(piPrivate, body, accessKey));
+});
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
