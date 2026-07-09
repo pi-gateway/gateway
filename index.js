@@ -306,7 +306,12 @@ async function sendNotifications(recipientPi, payload) {
     const notifyEmail = beh.notify_email;
     if (!slackUrl && !notifyEmail) return;
 
-    const fromName = payload.from_nick_operator || payload.from_nick_agent || 'Unknown';
+    // 'operator' is PIR's literal default when nick_operator was never set (see /pir/id
+    // POST) - an operator+agent hybrid pair (e.g. Cloot) never customises it, so its real
+    // identity lives in nick_agent only. Treat the literal default as unset, not a real name.
+    const opName    = payload.from_nick_operator;
+    const isDefault = !opName || opName.toLowerCase() === 'operator';
+    const fromName  = (!isDefault && opName) || payload.from_nick_agent || 'Unknown';
     const preview  = String(payload.content ?? '').replace(/\n/g, ' ').slice(0, 200);
 
     if (slackUrl) {
