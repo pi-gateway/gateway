@@ -1,4 +1,4 @@
-// π Gateway v3.3.0 — ping · browse · post · mount · SSE transport · auto-mount · browser connect
+// π Gateway v3.4.1 — ping · browse · post · mount · SSE transport · auto-mount · browser connect · Slack/email push notifications
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -17,9 +17,11 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.3.0';
+const GATEWAY_VERSION  = '3.4.1';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
+const VAULT            = process.env.VAULT_URL ?? 'http://localhost:3151';
+const VAULT_SERVICE_KEY = process.env.VAULT_SERVICE_KEY;
 
 const PRIVATE_PI_RE = /^3\.14\d{18}$/;
 const PUBLIC_PI_RE  = /^3\.14\d{10}$/;
@@ -76,15 +78,37 @@ function inferContentType(content) {
 
 // ── PIR ───────────────────────────────────────────────────────────────────────
 
-async function pirValidate(piPrivate, accessKey) {
-  const body = {};
-  if (accessKey) body.access_key = accessKey;
+async function pirValidate(piPrivate) {
   const r = await fetch(`${PIR}/validate`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
-    body:    JSON.stringify(body),
   });
   return r.ok ? r.json() : null;
+}
+
+// Access-key material lives in PIR-VAULT, not PIR. This reproduces PIR's old combined
+// validate+key behavior: a public_pi with a key registered in the vault MUST present the
+// correct one to come back valid at all; one with no key registered passes through with
+// access_key_verified: false, same as PIR's old per-identity hasKey semantics.
+async function vaultVerify(publicPi, accessKey) {
+  try {
+    const r = await fetch(`${VAULT}/verify`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ public_pi: publicPi, access_key: accessKey || undefined }),
+    });
+    return await r.json();
+  } catch { return null; }
+}
+
+async function validateWithKey(piPrivate, accessKey) {
+  const validated = await pirValidate(piPrivate);
+  if (!validated?.valid) return validated;
+  const vault = await vaultVerify(validated.public_pi, accessKey);
+  if (vault?.registered && !vault?.verified) {
+    return { valid: false, error: vault.error || 'Invalid access_key' };
+  }
+  return { ...validated, access_key_verified: vault?.registered ? vault.verified === true : false };
 }
 
 // This instance's own policy: require a verified access key regardless of whether PIR
@@ -159,6 +183,7 @@ function buildHelp() {
 ping
   Commission a new pair or boot an existing one. Config: personality, behaviors, auto_mount, gateway_mcp.
   Behaviors (all on by default): auto_log · session_end_log · start_with_last_log · auto_check_activity
+  Notify (off by default, needs your own): ping({notify:{slack, email}}) — Slack incoming-webhook URL / email address, from your own workspace. One call, takes effect on the next message.
   Call ping with no args to see current config.
 
 browse
@@ -263,6 +288,56 @@ async function deliverToUrl(payload, url) {
     console.error(`[deliver-home] ${deliverUrl} → error: ${e}`);
     return false;
   }
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+// Push notification for a message that just landed for a specific recipient —
+// fires independent of whether they're actively connected. Ported from pi-dev
+// (built + tested there first). Behaviors live in PIR here, not local
+// mcp_sessions, so this needs its own lookup rather than reusing pi-dev's query.
+async function sendNotifications(recipientPi, payload) {
+  if (!recipientPi) return;
+  try {
+    const pirRecord   = await pirLookup(recipientPi);
+    const beh         = pirRecord?.behaviors ?? {};
+    const slackUrl    = beh.notify_slack;
+    const notifyEmail = beh.notify_email;
+    if (!slackUrl && !notifyEmail) return;
+
+    const fromName = payload.from_nick_operator || payload.from_nick_agent || 'Unknown';
+    const preview  = String(payload.content ?? '').replace(/\n/g, ' ').slice(0, 200);
+
+    if (slackUrl) {
+      safeFetch(slackUrl, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: `New π message from *${fromName}*`,
+          attachments: [{ text: preview, color: '#015284' }],
+        }),
+      }).catch(() => {});
+    }
+
+    const mgKey    = process.env.MAILGUN_API_KEY;
+    const mgDomain = process.env.MAILGUN_DOMAIN;
+    if (notifyEmail && mgKey && mgDomain) {
+      const form = new URLSearchParams({
+        from:    `π <pi@${mgDomain}>`,
+        to:      notifyEmail,
+        subject: `[π] Message from ${fromName}`,
+        text:    `New π message from ${fromName}:\n\n${preview}\n\n— π never resolves, it grows.`,
+      });
+      fetch(`https://api.mailgun.net/v3/${mgDomain}/messages`, {
+        method:  'POST',
+        headers: {
+          Authorization:  `Basic ${Buffer.from(`api:${mgKey}`).toString('base64')}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: form.toString(),
+      }).catch(() => {});
+    }
+  } catch { /* fire and forget */ }
 }
 
 // ── fireUrl ───────────────────────────────────────────────────────────────────
@@ -383,13 +458,18 @@ async function toolSet(piPrivate, args, accessKey) {
     return noIdentity();
   }
 
-  // set_access_key: set or remove access key for this pair — PIR provisions the key
+  // set_access_key: set or remove access key for this pair — PIR-VAULT stores the key,
+  // separate from PIR's identity storage. Identity is verified via PIR first (real
+  // crypto check against the stored private_pi hash) so vault entries are only ever
+  // created for a public_pi the caller actually proved ownership of.
   if (args?.set_access_key !== undefined) {
+    const identity = await pirValidate(piPrivate);
+    if (!identity?.valid) return fail('Could not set access key. Check your π credentials.');
     const req_key = args.set_access_key === true ? true : (args.set_access_key || null);
-    const r = await fetch(`${PIR}/access-key`, {
+    const r = await fetch(`${VAULT}/set`, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
-      body:    JSON.stringify({ access_key: req_key }),
+      headers: { 'Content-Type': 'application/json', 'X-Vault-Service-Key': VAULT_SERVICE_KEY },
+      body:    JSON.stringify({ public_pi: identity.public_pi, access_key: req_key }),
     });
     const data = r.ok ? await r.json() : null;
     if (!data?.ok) return fail('Could not set access key. Check your π credentials.');
@@ -421,9 +501,19 @@ async function toolSet(piPrivate, args, accessKey) {
   if (args.auto_mount   !== undefined) pirUpdates.auto_mount   = Array.isArray(args.auto_mount) ? args.auto_mount : [args.auto_mount];
   if (args.cc_public_pi !== undefined) localUpdates.cc_public_pi = args.cc_public_pi;
 
+  // notify merges into behaviors client-side — PIR's /edit fully replaces the
+  // behaviors column (no jsonb merge like pi-dev's SQL), so start from whatever's
+  // already stored (plus any explicit args.behaviors update above) and layer on top.
+  if (args.notify !== undefined) {
+    const mergedBehaviors = { ...(existing?.behaviors ?? {}), ...(pirUpdates.behaviors ?? {}) };
+    if (args.notify?.slack !== undefined) mergedBehaviors.notify_slack = args.notify.slack ?? null;
+    if (args.notify?.email !== undefined) mergedBehaviors.notify_email = args.notify.email ?? null;
+    pirUpdates.behaviors = mergedBehaviors;
+  }
+
   if (Object.keys(pirUpdates).length) await pirUpdate(piPrivate, pirUpdates);
 
-  const validated = await pirValidate(piPrivate, accessKey);
+  const validated = await validateWithKey(piPrivate, accessKey);
   if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
   if (!passesLocalKeyPolicy(validated)) return fail('Access key required for this instance.');
 
@@ -520,7 +610,7 @@ async function toolSet(piPrivate, args, accessKey) {
     status:   'connected',
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
     spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-    config:   { personality, behaviors, auto_mount: autoMountUrls },
+    config:   { personality, behaviors, auto_mount: autoMountUrls, notify: { slack: behaviors.notify_slack ?? null, email: behaviors.notify_email ?? null } },
     help:     buildHelp(),
     ...(isNewPair ? {
       onboarding: {
@@ -809,6 +899,7 @@ async function toolPost(piPrivate, publicPi, args) {
       'SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
     );
     delivered = recipientSession ? true : await deliverToUrl(payload, target.gateway_mcp);
+    if (recipientSession) void sendNotifications(target.public_pi, payload);
   } else {
     delivered = await deliverToUrl(payload, target.gateway_mcp);
   }
@@ -941,6 +1032,7 @@ const BASE_TOOLS = [
         cc_public_pi:  { type: 'string', description: 'π address to CC on all incoming messages.' },
         personality:   { type: 'string', description: 'Agent personality text.' },
         behaviors:     { type: 'object', description: 'Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.' },
+        notify:        { type: 'object', description: 'Push notifications for incoming messages, independent of active connection. { slack: "<incoming webhook URL, from your own Slack workspace>", email: "<address>" }. Pass null to clear either.' },
         auto_mount:     { type: 'array', items: { type: 'string' }, description: 'MCP URLs to auto-mount at every boot for extra tools. Pure tool-extension - never replaces your base toolset (ping/browse/post/mount always come from gateway_mcp). Any tool name that collides with your base toolset or another mount is dropped, not overridden.' },
         gateway_mcp:    { type: 'string', description: 'Your gateway MCP URL (updated in PIR).' },
         set_access_key: { type: 'string', description: 'Security key for this pair. When set, connections without it are rejected. Provide a value to set or replace; omit to leave unchanged; clear to remove.' },
@@ -1009,7 +1101,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
 
   if (method === 'tools/list') {
     let tools = [...BASE_TOOLS];
-    const listValidated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await pirValidate(piPrivate, accessKey) : null;
+    const listValidated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await validateWithKey(piPrivate, accessKey) : null;
     if (listValidated?.valid && passesLocalKeyPolicy(listValidated)) {
       const publicPi = listValidated.public_pi;
       const { rows: [session] } = await pool.query(
@@ -1054,7 +1146,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
       if (toolName === 'ping') {
         result = await toolSet(piPrivate, args, accessKey);
       } else {
-        const validated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await pirValidate(piPrivate, accessKey) : null;
+        const validated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await validateWithKey(piPrivate, accessKey) : null;
         if (!validated?.valid || !passesLocalKeyPolicy(validated)) {
           return { jsonrpc: '2.0', id, result: noIdentity() };
         }
@@ -1142,6 +1234,8 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: String(e) });
   }
+
+  void sendNotifications(body.to_public_pi, body);
 
   // Auto-contact on deliver removed: contacts are managed via PIR.
   // piPrivate not available in /deliver context; contacts establish via post flows.
@@ -1465,7 +1559,7 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
   if (reqKey && !accessKey)
     return sendError('Access key required for this instance.');
 
-  const validated = await pirValidate(piPrivate, accessKey || undefined);
+  const validated = await validateWithKey(piPrivate, accessKey || undefined);
   if (!validated?.valid)
     return sendError('Credentials not recognised. Check your private π and access key.');
 
@@ -1491,7 +1585,7 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
   // Access key: from client_secret (direct/Advanced Settings path) or from form submission
   const accessKey = client_secret?.trim() || entry.accessKey || null;
 
-  const validated = await pirValidate(entry.piPrivate, accessKey);
+  const validated = await validateWithKey(entry.piPrivate, accessKey);
   if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
 
   const token = accessKey ? `${entry.piPrivate}|${accessKey}` : entry.piPrivate;
