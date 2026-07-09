@@ -527,17 +527,10 @@ async function toolSet(piPrivate, args, accessKey) {
     upsertVals.push(localUpdates.cc_public_pi);
   }
 
-  // connected_mounts: auto-sourced entries are dropped here and freshly re-attached below
-  // (auto_mount is pure config, always safe to refetch) — manual-sourced entries persist
-  // across ping/reconnect instead. A manual mount is a deliberate action; it should last
-  // until explicitly swapped for a different manual mount or exited, not get silently
-  // wiped by a routine boot (that made it unusable in practice — see conversation history
-  // for why, no MCP client actually re-polls tools/list mid-session, so a mount that only
-  // ever lived for the current boot could never actually be called).
-  const { rows: [priorSession] } = await pool.query(
-    'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1', [publicPi]
-  );
-  const preservedMounts = (priorSession?.connected_mounts ?? []).filter(m => m.source === 'manual');
+  // connected_mounts always starts empty on ping — manual mount is a stateless
+  // pass-through now (see toolEnter), nothing to preserve across a reconnect. Auto-sourced
+  // entries get freshly re-attached fresh below regardless of what was here before.
+  const preservedMounts = [];
   upsertCols.push('connected_mounts');
   upsertVals.push(JSON.stringify(preservedMounts));
 
@@ -951,67 +944,49 @@ async function toolEnter(piPrivate, publicPi, args, accessKey) {
     return ok({ status: 'already_here', note: "You're already connected to this server. Your current tools are all you need." });
   }
 
-  const { rows: [cur] } = await pool.query(
-    'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1',
-    [publicPi]
-  );
-  const currentMounts = cur?.connected_mounts ?? [];
-
-  // Toggle-exit: entering the already-manually-mounted MCP disconnects it. Deliberately
-  // scoped to source: 'manual' only — manually re-mounting a URL that happens to already
-  // be auto-mounted must never be able to tear down the auto_mount entry; it falls through
-  // to the mount attempt below instead, which will just report no new tools (everything's
-  // already claimed by the auto-mount).
-  const existingManualSame = currentMounts.find(m => m.url === targetUrl && m.source === 'manual');
-  if (existingManualSame) {
-    const remaining = currentMounts.filter(m => m.url !== targetUrl);
-    await pool.query(
-      'UPDATE mcp_sessions SET connected_mounts = $1::jsonb WHERE public_pi = $2',
-      [JSON.stringify(remaining), publicPi]
-    );
-    notifyToolsChanged(publicPi);
-    return ok({ status: 'exited', note: `Disconnected from ${targetName}.` });
-  }
-
-  // Manual mounts are exclusive — one at a time, unlike auto_mount (designed to layer many
-  // services at once, as a persistent service roster). Mounting a different server
-  // auto-unmounts whatever was manually mounted before. Auto-mounted entries are never
-  // touched by this — only ever one manual entry gets replaced.
-  const existingManual = currentMounts.find(m => m.source === 'manual');
-  const baseMounts = existingManual ? currentMounts.filter(m => m.source !== 'manual') : currentMounts;
-
+  // Manual mount is a stateless pass-through, not a persistent connection — nothing is
+  // written to connected_mounts (that's auto_mount's job, see autoMountAll, untouched by
+  // this). A genuinely new tool name introduced mid-session or on reconnect is never
+  // reliably callable by a real MCP client regardless of how long it's persisted
+  // (confirmed exhaustively — see project_boot_proxy_scope memory), so there's nothing
+  // gained by keeping a manual mount around between calls, and nothing to unmount either.
+  // Every call resolves the target fresh; pass `tool` (+ `args`) to invoke it in the same
+  // round trip instead of relying on a later direct-name call.
   try {
     const tools = await fetchMountTools(targetUrl, piPrivate, accessKey);
     const now   = new Date().toISOString();
-    const { mount, dropped } = mergeMount(baseMounts, targetUrl, targetName, tools, 'manual');
-    const mounts = [...baseMounts, mount];
 
-    await Promise.all([
-      pool.query(
-        'UPDATE mcp_sessions SET connected_mounts = $1::jsonb, last_seen = $2 WHERE public_pi = $3',
-        [JSON.stringify(mounts), now, publicPi]
-      ),
-      pool.query(`
-        INSERT INTO mcp_history (public_pi, url, name, tools, accessed_at)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (public_pi, url) DO UPDATE SET
-          name = EXCLUDED.name, tools = EXCLUDED.tools, accessed_at = EXCLUDED.accessed_at
-      `, [publicPi, targetUrl, targetName, JSON.stringify(tools), now]),
-    ]);
+    pool.query(`
+      INSERT INTO mcp_history (public_pi, url, name, tools, accessed_at)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (public_pi, url) DO UPDATE SET
+        name = EXCLUDED.name, tools = EXCLUDED.tools, accessed_at = EXCLUDED.accessed_at
+    `, [publicPi, targetUrl, targetName, JSON.stringify(tools), now]).catch(() => {});
 
-    const gatewayTools = BASE_TOOLS.map(t => ({ name: t.name, description: t.description }));
-    const serverTools  = mount.tools.map(t => ({ name: t.name, description: `[${targetName}] ${t.description ?? ''}`.trim() }));
+    if (args.tool) {
+      const target = tools.find(t => t.name === args.tool);
+      if (!target) {
+        return fail(`"${args.tool}" not found on ${targetName}.`, `Available: ${tools.map(t => t.name).join(', ') || '(none)'}`);
+      }
+      const r = await fetch(targetUrl, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate, ...(accessKey ? { 'X-Pi-Access-Key': accessKey } : {}) },
+        body:    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: args.tool, arguments: args.args ?? {} } }),
+        signal:  AbortSignal.timeout(15000),
+      });
+      if (!r.ok) return fail(`Call to ${targetName} failed (${r.status}).`);
+      const result = await r.json();
+      return result.error ? fail(result.error.message) : result.result;
+    }
 
-    notifyToolsChanged(publicPi);
+    const serverTools = tools.map(t => ({ name: t.name, description: `[${targetName}] ${t.description ?? ''}`.trim() }));
     return ok({
       entered: targetName,
       url:     targetUrl,
-      tools:   { gateway: gatewayTools, server: serverTools },
-      ...(existingManual ? { unmounted: existingManual.name, unmounted_note: 'Manual mounts are exclusive — replaced automatically.' } : {}),
-      ...(dropped.length ? { dropped_tools: dropped, dropped_note: 'These names collide with your base toolset or another mount — call the existing one instead.' } : {}),
-      note: mount.tools.length
-        ? `${mount.tools.length} tools from ${targetName} now available. Call them directly by name. This mount persists across reconnects until you mount a different server or call mount again with this same URL to exit.`
-        : `Connected to ${targetName}. No new tools available.`,
+      tools:   { server: serverTools },
+      note: serverTools.length
+        ? `${serverTools.length} tools available at ${targetName}. Call one with mount({ url, tool, args }) — direct-name calling isn't supported for manual mounts.`
+        : `Connected to ${targetName}. No tools available.`,
     });
   } catch (e) {
     return fail(`Could not connect to ${targetUrl}.`, String(e.message ?? e));
@@ -1098,12 +1073,14 @@ const BASE_TOOLS = [
   },
   {
     name: 'mount',
-    description: "Mount any MCP on the π network — registered or not. Returns the full tool list: π base tools + server tools. That's your help for that server. Call server tools directly by name after mounting. Exclusive and persistent: only one manual mount at a time — mounting a different server auto-unmounts the previous one, and it survives reconnects until you swap it or call mount again with the same URL to exit. Doesn't affect auto_mount, which stays separate and can hold many servers at once.",
+    description: "Mount any MCP on the π network — registered or not. Stateless pass-through: give url (or name from the π registry) alone to see its tool list, or add tool + args to call one of them directly in the same request and get its result back. Nothing persists between calls — there's no 'currently mounted' server to reconnect to or unmount. Doesn't affect auto_mount, a separate, persistent tool-extension mechanism configured via ping.",
     inputSchema: {
       type: 'object',
       properties: {
         url:  { type: 'string', description: 'Direct MCP URL.' },
         name: { type: 'string', description: 'Name from π registry.' },
+        tool: { type: 'string', description: 'Tool name to call on the target, in the same request. Omit to just see its tool list.' },
+        args: { type: 'object', description: 'Arguments for tool, passed through as-is.' },
       },
     },
   },
