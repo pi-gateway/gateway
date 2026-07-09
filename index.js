@@ -492,7 +492,7 @@ async function toolSet(piPrivate, args, accessKey) {
   // storage always live. Only defaulted on true first-time registration (no existing
   // value), never overwritten just because a call happens to be handled by a different
   // server. Explicit args.gateway_mcp still wins.
-  const existing    = await pirLookup(publicPi);
+  const existing    = await pirValidate(piPrivate); // pirLookup (GET /pir/id) is the public unauthenticated route and never returns behaviors/personality; the notify merge below needs the real stored behaviors, not {}.
   const pirUpdates  = {};
   if (!existing?.gateway_mcp) pirUpdates.gateway_mcp = selfUrl();
 
