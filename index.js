@@ -1,4 +1,5 @@
-// π Gateway v3.4.1 — ping · browse · post · mount · SSE transport · auto-mount · browser connect · Slack/email push notifications
+// π Gateway v3.6.0 — ping · browse · post · mount (exclusive + persistent) · SSE transport ·
+// auto-mount · browser connect · Slack/email push notifications
 // Node.js / Express / pg | MIT License
 
 import express from 'express';
@@ -17,7 +18,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.4.1';
+const GATEWAY_VERSION  = '3.6.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 const VAULT            = process.env.VAULT_URL ?? 'http://localhost:3151';
@@ -376,14 +377,14 @@ async function fireUrl(url, content, content_type, publicPi, postId) {
 // takeover entirely: a mounted server exposing all 4 base verbs just has those 4 names
 // excluded as duplicates, like any other conflict. gateway_mcp (this server) always owns
 // ping/browse/post/mount - nothing mounted can ever replace them or relocate this session.
-function mergeMount(connectedMounts, url, name, tools) {
+function mergeMount(connectedMounts, url, name, tools, source) {
   const taken = new Set([
     ...BASE_TOOLS.map(t => t.name),
     ...connectedMounts.flatMap(m => (m.tools ?? []).map(t => t.name)),
   ]);
   const kept    = tools.filter(t => !taken.has(t.name));
   const dropped = tools.filter(t => taken.has(t.name)).map(t => t.name);
-  return { mount: { url, name, tools: kept }, dropped };
+  return { mount: { url, name, tools: kept, source }, dropped };
 }
 
 async function fetchMountTools(targetUrl, piPrivate, accessKey) {
@@ -413,7 +414,7 @@ async function autoMountAll(piPrivate, publicPi, accessKey, autoMountUrls, conne
     if (mounts.some(m => m.url === url)) continue;
     try {
       const tools = await fetchMountTools(url, piPrivate, accessKey);
-      const { mount, dropped } = mergeMount(mounts, url, url, tools);
+      const { mount, dropped } = mergeMount(mounts, url, url, tools, 'auto');
       mounts = [...mounts, mount];
       results.push({ url, tools_added: mount.tools.length, tools_dropped: dropped });
     } catch (e) {
@@ -526,10 +527,19 @@ async function toolSet(piPrivate, args, accessKey) {
     upsertVals.push(localUpdates.cc_public_pi);
   }
 
-  // connected_mounts reset to empty on every set() — fresh session, no stale mount state.
-  // auto_mount URLs get freshly re-attached right after, below.
+  // connected_mounts: auto-sourced entries are dropped here and freshly re-attached below
+  // (auto_mount is pure config, always safe to refetch) — manual-sourced entries persist
+  // across ping/reconnect instead. A manual mount is a deliberate action; it should last
+  // until explicitly swapped for a different manual mount or exited, not get silently
+  // wiped by a routine boot (that made it unusable in practice — see conversation history
+  // for why, no MCP client actually re-polls tools/list mid-session, so a mount that only
+  // ever lived for the current boot could never actually be called).
+  const { rows: [priorSession] } = await pool.query(
+    'SELECT connected_mounts FROM mcp_sessions WHERE public_pi = $1', [publicPi]
+  );
+  const preservedMounts = (priorSession?.connected_mounts ?? []).filter(m => m.source === 'manual');
   upsertCols.push('connected_mounts');
-  upsertVals.push('[]');
+  upsertVals.push(JSON.stringify(preservedMounts));
 
   const placeholders = upsertVals.map((_, i) => `$${i + 1}`).join(', ');
   const updateSets   = upsertCols
@@ -646,12 +656,16 @@ async function toolSet(piPrivate, args, accessKey) {
   }
 
   // auto_mount: pure tool-extension, never identity-relocation. Attaches any configured
-  // URLs (connected_mounts was just reset above, so this is always a fresh attach this
-  // boot); colliding tool names are dropped, not overridden.
+  // URLs on top of whatever manual mount survived the reset above; colliding tool names
+  // are dropped, not overridden.
+  let finalMounts = preservedMounts;
   if (autoMountUrls.length) {
     const { mounts, results } = await autoMountAll(piPrivate, publicPi, accessKey, autoMountUrls, session?.connected_mounts ?? []);
     if (results.length) response.auto_mounted = results;
-    response.mounted = mounts.map(m => ({ url: m.url, name: m.name, tool_count: m.tools?.length ?? 0 }));
+    finalMounts = mounts;
+  }
+  if (finalMounts.length) {
+    response.mounted = finalMounts.map(m => ({ url: m.url, name: m.name, tool_count: m.tools?.length ?? 0, source: m.source }));
   }
 
   // Gateway docs pointer
@@ -943,8 +957,13 @@ async function toolEnter(piPrivate, publicPi, args, accessKey) {
   );
   const currentMounts = cur?.connected_mounts ?? [];
 
-  // Toggle-exit: entering an already-mounted MCP disconnects just that one mount
-  if (currentMounts.some(m => m.url === targetUrl)) {
+  // Toggle-exit: entering the already-manually-mounted MCP disconnects it. Deliberately
+  // scoped to source: 'manual' only — manually re-mounting a URL that happens to already
+  // be auto-mounted must never be able to tear down the auto_mount entry; it falls through
+  // to the mount attempt below instead, which will just report no new tools (everything's
+  // already claimed by the auto-mount).
+  const existingManualSame = currentMounts.find(m => m.url === targetUrl && m.source === 'manual');
+  if (existingManualSame) {
     const remaining = currentMounts.filter(m => m.url !== targetUrl);
     await pool.query(
       'UPDATE mcp_sessions SET connected_mounts = $1::jsonb WHERE public_pi = $2',
@@ -954,11 +973,18 @@ async function toolEnter(piPrivate, publicPi, args, accessKey) {
     return ok({ status: 'exited', note: `Disconnected from ${targetName}.` });
   }
 
+  // Manual mounts are exclusive — one at a time, unlike auto_mount (designed to layer many
+  // services at once, as a persistent service roster). Mounting a different server
+  // auto-unmounts whatever was manually mounted before. Auto-mounted entries are never
+  // touched by this — only ever one manual entry gets replaced.
+  const existingManual = currentMounts.find(m => m.source === 'manual');
+  const baseMounts = existingManual ? currentMounts.filter(m => m.source !== 'manual') : currentMounts;
+
   try {
     const tools = await fetchMountTools(targetUrl, piPrivate, accessKey);
     const now   = new Date().toISOString();
-    const { mount, dropped } = mergeMount(currentMounts, targetUrl, targetName, tools);
-    const mounts = [...currentMounts, mount];
+    const { mount, dropped } = mergeMount(baseMounts, targetUrl, targetName, tools, 'manual');
+    const mounts = [...baseMounts, mount];
 
     await Promise.all([
       pool.query(
@@ -981,9 +1007,10 @@ async function toolEnter(piPrivate, publicPi, args, accessKey) {
       entered: targetName,
       url:     targetUrl,
       tools:   { gateway: gatewayTools, server: serverTools },
+      ...(existingManual ? { unmounted: existingManual.name, unmounted_note: 'Manual mounts are exclusive — replaced automatically.' } : {}),
       ...(dropped.length ? { dropped_tools: dropped, dropped_note: 'These names collide with your base toolset or another mount — call the existing one instead.' } : {}),
       note: mount.tools.length
-        ? `${mount.tools.length} tools from ${targetName} now available. Call them directly by name.`
+        ? `${mount.tools.length} tools from ${targetName} now available. Call them directly by name. This mount persists across reconnects until you mount a different server or call mount again with this same URL to exit.`
         : `Connected to ${targetName}. No new tools available.`,
     });
   } catch (e) {
@@ -1071,7 +1098,7 @@ const BASE_TOOLS = [
   },
   {
     name: 'mount',
-    description: "Mount any MCP on the π network — registered or not. Returns the full tool list: π base tools + server tools. That's your help for that server. Call server tools directly by name after mounting.",
+    description: "Mount any MCP on the π network — registered or not. Returns the full tool list: π base tools + server tools. That's your help for that server. Call server tools directly by name after mounting. Exclusive and persistent: only one manual mount at a time — mounting a different server auto-unmounts the previous one, and it survives reconnects until you swap it or call mount again with the same URL to exit. Doesn't affect auto_mount, which stays separate and can hold many servers at once.",
     inputSchema: {
       type: 'object',
       properties: {
