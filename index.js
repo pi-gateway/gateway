@@ -1127,13 +1127,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
   }
 
   if (method === 'tools/list') {
-    // ORDER-EXPERIMENT (temporary, see conversation): mounted tools listed BEFORE base
-    // tools in the returned array, instead of base-first-then-appended. Collision
-    // preference is completely unchanged below — base tools still win on a name clash,
-    // colliding mount tools still get dropped, not overridden. This only tests whether
-    // array *position* affects whether a real MCP client picks up a newly mounted tool
-    // without an explicit refresh.
-    let mountedTools = [];
+    let tools = [...BASE_TOOLS];
     const listValidated = piPrivate && PRIVATE_PI_RE.test(piPrivate) ? await validateWithKey(piPrivate, accessKey) : null;
     if (listValidated?.valid && passesLocalKeyPolicy(listValidated)) {
       const publicPi = listValidated.public_pi;
@@ -1158,15 +1152,14 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           });
           if (liveRes.ok) liveTools = (await liveRes.json())?.result?.tools ?? liveTools;
         } catch (e) { /* fall back to cached tools */ }
-        const taken = new Set([...BASE_TOOLS.map(t => t.name), ...mountedTools.map(t => t.name)]);
+        const taken = new Set(tools.map(t => t.name));
         const kept  = liveTools.filter(t => !taken.has(t.name));
-        mountedTools = [...mountedTools, ...kept.map(t => ({
+        tools = [...tools, ...kept.map(t => ({
           ...t,
           description: `[${m.name}] ${t.description ?? ''}`.trim(),
         }))];
       }
     }
-    const tools = [...mountedTools, ...BASE_TOOLS];
     return { jsonrpc: '2.0', id, result: { tools } };
   }
 
