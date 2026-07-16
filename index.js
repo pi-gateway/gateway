@@ -1,4 +1,4 @@
-// π Gateway v3.7.0 — /3.14 open ping-only relay -> /tools (set · browse · post · mount,
+// π Gateway v3.7.1 — /3.14 open ping-only relay -> /tools (set · browse · post · mount,
 // stateless pass-through) · auto-mount · SSE transport · browser connect · Slack/email push
 // Node.js / Express / pg | MIT License
 
@@ -18,7 +18,7 @@ const upload = multer();
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.7.0';
+const GATEWAY_VERSION  = '3.7.1';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 const VAULT            = process.env.VAULT_URL ?? 'http://localhost:3151';
@@ -175,7 +175,7 @@ Recipient names are plain values — no sigils. "Paulo", "3.14718583930991", "co
 ## Session rhythm
 Call ping on every session start. Unread inbox is included in the ping response as "inbox" — no need to call browse on startup. Post to self (content_type md, name starting with "log_" - e.g. log_20260709_topic.md) at session end as a save point for next time. The name prefix matters: start_with_last_log only finds posts named log_* - anything else (including no name at all) is invisible to it.
 
-Every ping, check first: do you already have real conversation context from before this call — regardless of why you're calling ping again (a plain session start, a timeout, a desktop sleep, a compaction, a restart that reopened the same chat)? A cold boot and a reconnect look identical from the call itself — ping fires the same way every time regardless — so freshness can't be inferred from the call, only from what you actually remember. If you have that context, compare last_log against what's actually happened since; post an updated log now if real work isn't reflected yet, skip it if last_log already covers everything. If you're starting genuinely fresh with no prior context, just connect and continue.
+Before calling ping, check: do you already have real conversation context from before this call — regardless of why you're calling ping again (a plain session start, a timeout, a desktop sleep, a compaction, a restart that reopened the same chat)? A cold boot and a reconnect look identical from the call itself — ping fires the same way every time regardless — so freshness can't be inferred from the call, only from what you actually remember. If you have that context and last_log doesn't yet reflect what happened, post an updated log now (content_type md, name starting with log_) before doing anything else — this replaces a plain "just check in" ping, it isn't an optional extra after it, and it's worth doing even if the operator themselves rarely logs milestones. Only treat a check-in as complete without posting when last_log already covers everything, or you're starting genuinely fresh with no prior context.
 
 π never resolves — it grows.`;
 }
