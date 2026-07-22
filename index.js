@@ -203,7 +203,9 @@ post
   Recipients: self (default) · nickname · contacts · all
   Content types: json (default, 90-day TTL) · md · svg · webp (permanent)
   Schedule: at = ISO timestamp. Post appears in browse(activity) when due.
-  Thread: reply_to = post ID. Reply scope defaults to original recipients.
+  Thread: reply_to = post ID. Reply scope defaults to original recipients. Works across
+    instances too, but only for a post_id you actually have — e.g. one shared with you — not
+    an arbitrary foreign ID; otherwise it just drops silently rather than failing the send.
   API: url = endpoint. Fires on post. Feedback returned as self-note.
   Share: post({ to, name }) with NO content shares one of your own existing posts by live
     reference instead of writing something new — nothing is duplicated, works across instances
@@ -263,12 +265,15 @@ async function fetchUnreadInbox(publicPi, limit = 50) {
   const now = new Date().toISOString();
   const [{ rows: ownPosts }, { rows: sharedPosts }, { rows: remotePointers }] = await Promise.all([
     pool.query(`
-      SELECT id, from_public_pi, to_scope, content, content_type, name, reply_to, url, created_at, accessed_at
-      FROM posts
-      WHERE (to_public_pi = $1 OR to_scope = 'all')
-        AND accessed_at IS NULL
-        AND (at IS NULL OR at <= $2)
-      ORDER BY created_at ASC
+      SELECT p.id, p.from_public_pi, p.to_scope, p.content, p.content_type, p.name, p.reply_to, p.url,
+             p.created_at, p.accessed_at,
+             rr.target_post_id AS reply_to_remote_post_id, rr.target_gateway_mcp AS reply_to_remote_origin
+      FROM posts p
+      LEFT JOIN remote_reply_refs rr ON rr.post_id = p.id
+      WHERE (p.to_public_pi = $1 OR p.to_scope = 'all')
+        AND p.accessed_at IS NULL
+        AND (p.at IS NULL OR p.at <= $2)
+      ORDER BY p.created_at ASC
       LIMIT $3
     `, [publicPi, now, limit]),
     pool.query(`
@@ -329,7 +334,14 @@ async function fetchUnreadInbox(publicPi, limit = 50) {
     }
   }
 
-  return [...ownPosts, ...sharedPosts, ...remoteResolved]
+  const ownPostsMapped = ownPosts.map(({ reply_to_remote_post_id, reply_to_remote_origin, ...p }) => ({
+    ...p,
+    ...(reply_to_remote_post_id
+      ? { reply_to_remote: { post_id: reply_to_remote_post_id, origin_gateway_mcp: reply_to_remote_origin } }
+      : {}),
+  }));
+
+  return [...ownPostsMapped, ...sharedPosts, ...remoteResolved]
     .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
     .slice(0, limit);
 }
@@ -824,11 +836,14 @@ async function toolBrowse(piPrivate, publicPi, args) {
   if (target === 'history') {
     const [{ rows: posts }, { rows: remotePointers }] = await Promise.all([
       pool.query(`
-        SELECT id, from_public_pi, to_scope, to_public_pi, content, content_type, name, created_at, accessed_at
-        FROM posts
-        WHERE from_public_pi = $1 OR to_public_pi = $1
-           OR id IN (SELECT post_id FROM post_shares WHERE shared_with_public_pi = $1)
-        ORDER BY created_at DESC
+        SELECT p.id, p.from_public_pi, p.to_scope, p.to_public_pi, p.content, p.content_type, p.name,
+               p.created_at, p.accessed_at,
+               rr.target_post_id AS reply_to_remote_post_id, rr.target_gateway_mcp AS reply_to_remote_origin
+        FROM posts p
+        LEFT JOIN remote_reply_refs rr ON rr.post_id = p.id
+        WHERE p.from_public_pi = $1 OR p.to_public_pi = $1
+           OR p.id IN (SELECT post_id FROM post_shares WHERE shared_with_public_pi = $1)
+        ORDER BY p.created_at DESC
         LIMIT $2
       `, [publicPi, limit]),
       pool.query(`
@@ -838,6 +853,13 @@ async function toolBrowse(piPrivate, publicPi, args) {
         ORDER BY shared_at DESC LIMIT $2
       `, [publicPi, limit]),
     ]);
+
+    const postsMapped = posts.map(({ reply_to_remote_post_id, reply_to_remote_origin, ...p }) => ({
+      ...p,
+      ...(reply_to_remote_post_id
+        ? { reply_to_remote: { post_id: reply_to_remote_post_id, origin_gateway_mcp: reply_to_remote_origin } }
+        : {}),
+    }));
 
     // Remote shares show metadata only here — resolving every item on every history browse
     // would mean one live HTTP call per row for a plain listing. Use
@@ -851,7 +873,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
         : 'Shared from another π instance.',
     }));
 
-    const merged = [...posts, ...remoteRows]
+    const merged = [...postsMapped, ...remoteRows]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
       .slice(0, limit);
     return ok({ ...base, posts: merged, count: merged.length });
@@ -955,18 +977,36 @@ async function toolPost(piPrivate, publicPi, args) {
 
   let resolvedTo = toArg ?? 'self';
   let originalReplyRow = null;
+  // Set only when reply_to references something we know lives on another instance (i.e. it
+  // showed up in our own remote_shares) — the one case cross-instance threading can actually
+  // resolve, since we know exactly where to look. A reply_to we have no record of at all can't
+  // be threaded (no way to know where it lives without an unbounded network-wide search), so it
+  // just drops silently, same as before.
+  let remoteReplyTarget = null;
   if (reply_to) {
     const { rows: [original] } = await pool.query('SELECT from_public_pi FROM posts WHERE id = $1', [reply_to]);
     originalReplyRow = original ?? null;
-    if (!toArg && originalReplyRow?.from_public_pi && originalReplyRow.from_public_pi !== publicPi) {
-      resolvedTo = originalReplyRow.from_public_pi;
+    if (originalReplyRow) {
+      if (!toArg && originalReplyRow.from_public_pi && originalReplyRow.from_public_pi !== publicPi) {
+        resolvedTo = originalReplyRow.from_public_pi;
+      }
+    } else {
+      const { rows: remoteRows } = await pool.query(`
+        SELECT origin_gateway_mcp, from_public_pi FROM remote_shares
+        WHERE post_id = $1 AND shared_with_public_pi = $2
+      `, [reply_to, publicPi]);
+      if (remoteRows.length) {
+        remoteReplyTarget = { target_post_id: reply_to, target_gateway_mcp: remoteRows[0].origin_gateway_mcp };
+        if (!toArg && remoteRows[0].from_public_pi && remoteRows[0].from_public_pi !== publicPi) {
+          resolvedTo = remoteRows[0].from_public_pi;
+        }
+      }
     }
   }
-  // reply_to only threads locally — the referenced post has to exist in THIS instance's own
-  // posts table, or the INSERT below violates the FK constraint outright (a cross-instance
-  // reply_to, e.g. threading off a post someone shared with you from another instance, always
-  // hits this). Drop it silently rather than fail the whole send over a threading nicety —
-  // same precedent already used for inbound federated delivery, see /deliver below.
+  // reply_to itself only ever threads locally — the referenced post has to exist in THIS
+  // instance's own posts table, or the INSERT below violates the FK constraint outright. A
+  // genuinely cross-instance thread (remoteReplyTarget above) is recorded separately, after the
+  // post exists, via recordRemoteReplyRef — see each branch below.
   const safeReplyTo = originalReplyRow ? reply_to : null;
 
   const content_type = args.content_type || inferContentType(content);
@@ -1000,16 +1040,24 @@ async function toolPost(piPrivate, publicPi, args) {
       if (existingPost) {
         await pool.query(`UPDATE posts SET content = $1, content_type = $2, at = $3 WHERE id = $4`,
           [content, content_type, at ?? null, existingPost.id]);
+        if (remoteReplyTarget) await recordRemoteReplyRef(existingPost.id, remoteReplyTarget);
         if (url) fireUrl(url, content, content_type, publicPi, existingPost.id).catch(() => {});
-        return ok({ posted: true, id: existingPost.id, to: 'self', content_type, name: fileName, updated: true });
+        return ok({
+          posted: true, id: existingPost.id, to: 'self', content_type, name: fileName, updated: true,
+          ...(remoteReplyTarget ? { replying_to: remoteReplyTarget } : {}),
+        });
       }
     }
     const { rows: [post] } = await pool.query(`
       INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at)
       VALUES ($1, 'self', $1, $2, $3, $4, $5, $6, $7) RETURNING id
     `, [publicPi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
+    if (remoteReplyTarget) await recordRemoteReplyRef(post?.id, remoteReplyTarget);
     if (url) fireUrl(url, content, content_type, publicPi, post?.id).catch(() => {});
-    return ok({ posted: true, id: post?.id, to: 'self', content_type, name: fileName });
+    return ok({
+      posted: true, id: post?.id, to: 'self', content_type, name: fileName,
+      ...(remoteReplyTarget ? { replying_to: remoteReplyTarget } : {}),
+    });
   }
 
   // All — admin only
@@ -1019,8 +1067,12 @@ async function toolPost(piPrivate, publicPi, args) {
       INSERT INTO posts (from_public_pi, to_scope, content, content_type, name, reply_to, url, at)
       VALUES ($1, 'all', $2, $3, $4, $5, $6, $7) RETURNING id
     `, [publicPi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
+    if (remoteReplyTarget) await recordRemoteReplyRef(post?.id, remoteReplyTarget);
     if (url) fireUrl(url, content, content_type, publicPi, post?.id).catch(() => {});
-    return ok({ posted: true, id: post?.id, to: 'all', content_type, name: fileName });
+    return ok({
+      posted: true, id: post?.id, to: 'all', content_type, name: fileName,
+      ...(remoteReplyTarget ? { replying_to: remoteReplyTarget } : {}),
+    });
   }
 
   // Contacts broadcast
@@ -1042,6 +1094,7 @@ async function toolPost(piPrivate, publicPi, args) {
         INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at)
         VALUES ($1, 'nickname', $2, $3, $4, $5, $6, $7, $8) RETURNING id
       `, [publicPi, c.contact_public_pi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
+      if (remoteReplyTarget) await recordRemoteReplyRef(post?.id, remoteReplyTarget);
       const delivered = await deliverToGateway({
         from_public_pi: publicPi, to_public_pi: c.contact_public_pi,
         content, content_type, name: fileName ?? null, reply_to: safeReplyTo, url: url ?? null, at: at ?? null,
@@ -1050,7 +1103,10 @@ async function toolPost(piPrivate, publicPi, args) {
       }, target);
       results.push({ to: c.contact_nick_agent ?? c.contact_public_pi, delivered });
     }
-    return ok({ posted: true, to: 'contacts', count: results.length, results });
+    return ok({
+      posted: true, to: 'contacts', count: results.length, results,
+      ...(remoteReplyTarget ? { replying_to: remoteReplyTarget } : {}),
+    });
   }
 
   // Nickname or π address
@@ -1069,6 +1125,7 @@ async function toolPost(piPrivate, publicPi, args) {
     INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at)
     VALUES ($1, 'nickname', $2, $3, $4, $5, $6, $7, $8) RETURNING id
   `, [publicPi, target.public_pi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
+  if (remoteReplyTarget) await recordRemoteReplyRef(post?.id, remoteReplyTarget);
 
   const payload = {
     from_public_pi: publicPi, to_public_pi: target.public_pi,
@@ -1094,7 +1151,11 @@ async function toolPost(piPrivate, publicPi, args) {
 
   if (url) fireUrl(url, content, content_type, publicPi, post?.id).catch(() => {});
 
-  return ok({ posted: true, id: post?.id, to: target.public_pi, pair: `${target.nick_agent} (${target.nick_operator})`, delivered, content_type, name: fileName });
+  return ok({
+    posted: true, id: post?.id, to: target.public_pi, pair: `${target.nick_agent} (${target.nick_operator})`,
+    delivered, content_type, name: fileName,
+    ...(remoteReplyTarget ? { replying_to: remoteReplyTarget } : {}),
+  });
 }
 
 // ── Tool: post — share (live link to an existing post, no content duplication) ────────────────
@@ -1223,6 +1284,20 @@ async function fetchRemoteShare(originGatewayMcp, postId, sharedWithPublicPi) {
   } catch {
     return null;
   }
+}
+
+// Records that a just-created local post is really a reply to something on another instance —
+// the cross-instance half of threading. The post's own reply_to column stays NULL (no local FK
+// target exists); this is the resolvable pointer read paths join against instead.
+async function recordRemoteReplyRef(postId, remoteReplyTarget) {
+  if (!postId || !remoteReplyTarget) return;
+  try {
+    await pool.query(`
+      INSERT INTO remote_reply_refs (post_id, target_post_id, target_gateway_mcp)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (post_id) DO UPDATE SET target_post_id = EXCLUDED.target_post_id, target_gateway_mcp = EXCLUDED.target_gateway_mcp
+    `, [postId, remoteReplyTarget.target_post_id, remoteReplyTarget.target_gateway_mcp]);
+  } catch { /* best effort — the post itself already sent successfully either way */ }
 }
 
 // ── Tool: mount ───────────────────────────────────────────────────────────────
