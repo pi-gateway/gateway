@@ -232,18 +232,106 @@ async function upsertContact(piPrivate, contact) {
 
 // ── Ambient brief ─────────────────────────────────────────────────────────────
 
+// Cheap badge count only — never resolves remote shares live (that's fetchUnreadInbox's job),
+// just counts pointer rows so this stays fast enough to run on every browse() call regardless
+// of target, not just activity.
 async function getAmbient(publicPi) {
   const now = new Date().toISOString();
-  const { rows } = await pool.query(`
-    SELECT id, to_scope FROM posts
-    WHERE (to_public_pi = $1 OR to_scope = 'all')
-      AND accessed_at IS NULL
-      AND (at IS NULL OR at <= $2)
-  `, [publicPi, now]);
+  const [{ rows }, { rows: sharedRows }, { rows: remoteRows }] = await Promise.all([
+    pool.query(`
+      SELECT id, to_scope FROM posts
+      WHERE (to_public_pi = $1 OR to_scope = 'all')
+        AND accessed_at IS NULL
+        AND (at IS NULL OR at <= $2)
+    `, [publicPi, now]),
+    pool.query(`SELECT 1 FROM post_shares WHERE shared_with_public_pi = $1 AND accessed_at IS NULL`, [publicPi]),
+    pool.query(`SELECT 1 FROM remote_shares WHERE shared_with_public_pi = $1 AND accessed_at IS NULL`, [publicPi]),
+  ]);
   return {
-    unread:   rows.filter(p => p.to_scope === 'nickname' || p.to_scope === 'self').length,
+    unread:   rows.filter(p => p.to_scope === 'nickname' || p.to_scope === 'self').length + sharedRows.length + remoteRows.length,
     mentions: 0,
   };
+}
+
+// The one real source of truth for "what's unread right now" — used by both ping's inline
+// inbox and browse(activity). Merges own/broadcast posts, local shares, and cross-instance
+// shares (resolved live), and marks everything it returns as read. getAmbient (above) stays
+// separate because it needs to stay cheap on every browse() call regardless of target — this
+// one does real work (live HTTP resolves, UPDATEs) and should only run when something is
+// actually being consumed.
+async function fetchUnreadInbox(publicPi, limit = 50) {
+  const now = new Date().toISOString();
+  const [{ rows: ownPosts }, { rows: sharedPosts }, { rows: remotePointers }] = await Promise.all([
+    pool.query(`
+      SELECT id, from_public_pi, to_scope, content, content_type, name, reply_to, url, created_at, accessed_at
+      FROM posts
+      WHERE (to_public_pi = $1 OR to_scope = 'all')
+        AND accessed_at IS NULL
+        AND (at IS NULL OR at <= $2)
+      ORDER BY created_at ASC
+      LIMIT $3
+    `, [publicPi, now, limit]),
+    pool.query(`
+      SELECT p.id, p.from_public_pi, 'shared' AS to_scope, p.content, p.content_type, p.name,
+             NULL::uuid AS reply_to, NULL AS url, ps.shared_at AS created_at, NULL::timestamptz AS accessed_at
+      FROM post_shares ps
+      JOIN posts p ON p.id = ps.post_id
+      WHERE ps.shared_with_public_pi = $1 AND ps.accessed_at IS NULL
+      ORDER BY ps.shared_at ASC
+      LIMIT $2
+    `, [publicPi, limit]),
+    pool.query(`
+      SELECT post_id, origin_gateway_mcp, from_public_pi, name, content_type, shared_at
+      FROM remote_shares
+      WHERE shared_with_public_pi = $1 AND accessed_at IS NULL
+      ORDER BY shared_at ASC
+      LIMIT $2
+    `, [publicPi, limit]),
+  ]);
+
+  if (ownPosts.length) {
+    await pool.query('UPDATE posts SET accessed_at = $1 WHERE id = ANY($2)', [now, ownPosts.map(p => p.id)]);
+    for (const p of ownPosts) {
+      if (p.url) fireUrl(p.url, p.content, p.content_type, publicPi, p.id).catch(() => {});
+    }
+  }
+  if (sharedPosts.length) {
+    await pool.query(
+      'UPDATE post_shares SET accessed_at = $1 WHERE shared_with_public_pi = $2 AND post_id = ANY($3)',
+      [now, publicPi, sharedPosts.map(p => p.id)]
+    );
+  }
+
+  const remoteResolved = [];
+  if (remotePointers.length) {
+    const attempts = await Promise.all(remotePointers.map(async r => {
+      const data = await fetchRemoteShare(r.origin_gateway_mcp, r.post_id, publicPi);
+      return data?.found ? { pointer: r, data } : null;
+    }));
+    const resolvedIds = [];
+    for (const attempt of attempts) {
+      if (!attempt) continue;
+      resolvedIds.push(attempt.pointer.post_id);
+      remoteResolved.push({
+        id: attempt.pointer.post_id,
+        from_public_pi: attempt.pointer.from_public_pi ?? attempt.data.from_public_pi,
+        to_scope: 'shared', content: attempt.data.content,
+        content_type: attempt.data.content_type ?? attempt.pointer.content_type,
+        name: attempt.pointer.name ?? attempt.data.name,
+        reply_to: null, url: null, created_at: attempt.pointer.shared_at, accessed_at: null,
+      });
+    }
+    if (resolvedIds.length) {
+      await pool.query(
+        'UPDATE remote_shares SET accessed_at = $1 WHERE shared_with_public_pi = $2 AND post_id = ANY($3)',
+        [now, publicPi, resolvedIds]
+      );
+    }
+  }
+
+  return [...ownPosts, ...sharedPosts, ...remoteResolved]
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    .slice(0, limit);
 }
 
 // ── Resolve recipient ─────────────────────────────────────────────────────────
@@ -581,29 +669,11 @@ async function toolSet(piPrivate, args, accessKey) {
   // Activity brief
   const ambient = behaviors.auto_check_activity ? await getAmbient(publicPi) : null;
 
-  // Inline inbox fetch
+  // Inline inbox fetch — same source of truth as browse(activity), including local and
+  // cross-instance shares (see fetchUnreadInbox).
   let inboxMessages = null;
   if (behaviors.auto_check_activity && ambient && ambient.unread > 0) {
-    const { rows: inboxPosts } = await pool.query(`
-      SELECT id, from_public_pi, to_scope, content, content_type, name, reply_to, url, created_at, accessed_at
-      FROM posts
-      WHERE (to_public_pi = $1 OR to_scope = 'all')
-        AND accessed_at IS NULL
-        AND (at IS NULL OR at <= $2)
-      ORDER BY created_at ASC
-      LIMIT 50
-    `, [publicPi, now]);
-
-    const unreadPosts = inboxPosts.filter(p => !p.accessed_at);
-    if (unreadPosts.length) {
-      await pool.query(
-        'UPDATE posts SET accessed_at = $1 WHERE id = ANY($2)',
-        [now, unreadPosts.map(p => p.id)]
-      );
-      for (const p of unreadPosts) {
-        if (p.url) fireUrl(p.url, p.content, p.content_type, publicPi, p.id).catch(() => {});
-      }
-    }
+    const inboxPosts = await fetchUnreadInbox(publicPi, 50);
 
     const senderPis = [...new Set(inboxPosts.map(p => p.from_public_pi).filter(Boolean))];
     const nickMap = new Map();
@@ -693,82 +763,10 @@ async function toolBrowse(piPrivate, publicPi, args) {
   const query   = args.query;
   const limit   = args.limit  || 50;
   const ambient = await getAmbient(publicPi);
-  const now     = new Date().toISOString();
   const base    = { target, ambient, public_pi: publicPi };
 
   if (target === 'activity') {
-    const [{ rows: posts }, { rows: sharedPosts }, { rows: remotePointers }] = await Promise.all([
-      pool.query(`
-        SELECT id, from_public_pi, to_scope, content, content_type, name, reply_to, created_at, accessed_at
-        FROM posts
-        WHERE (to_public_pi = $1 OR to_scope = 'all')
-          AND accessed_at IS NULL
-          AND (at IS NULL OR at <= $2)
-        ORDER BY created_at ASC
-        LIMIT $3
-      `, [publicPi, now, limit]),
-      pool.query(`
-        SELECT p.id, p.from_public_pi, 'shared' AS to_scope, p.content, p.content_type, p.name,
-               NULL::uuid AS reply_to, ps.shared_at AS created_at, NULL::timestamptz AS accessed_at
-        FROM post_shares ps
-        JOIN posts p ON p.id = ps.post_id
-        WHERE ps.shared_with_public_pi = $1 AND ps.accessed_at IS NULL
-        ORDER BY ps.shared_at ASC
-        LIMIT $2
-      `, [publicPi, limit]),
-      pool.query(`
-        SELECT post_id, origin_gateway_mcp, from_public_pi, name, content_type, shared_at
-        FROM remote_shares
-        WHERE shared_with_public_pi = $1 AND accessed_at IS NULL
-        ORDER BY shared_at ASC
-        LIMIT $2
-      `, [publicPi, limit]),
-    ]);
-
-    const unread = posts.filter(p => !p.accessed_at);
-    if (unread.length) {
-      await pool.query('UPDATE posts SET accessed_at = $1 WHERE id = ANY($2)', [now, unread.map(p => p.id)]);
-    }
-    if (sharedPosts.length) {
-      await pool.query(
-        'UPDATE post_shares SET accessed_at = $1 WHERE shared_with_public_pi = $2 AND post_id = ANY($3)',
-        [now, publicPi, sharedPosts.map(p => p.id)]
-      );
-    }
-
-    // Posts shared with us from a different instance — resolved live from the origin, never
-    // cached here. A resolve failure (origin unreachable) just drops that one item silently;
-    // it stays unread and is retried on the next activity check.
-    const remoteResolved = [];
-    if (remotePointers.length) {
-      const attempts = await Promise.all(remotePointers.map(async r => {
-        const data = await fetchRemoteShare(r.origin_gateway_mcp, r.post_id, publicPi);
-        return data?.found ? { pointer: r, data } : null;
-      }));
-      const resolvedIds = [];
-      for (const attempt of attempts) {
-        if (!attempt) continue;
-        resolvedIds.push(attempt.pointer.post_id);
-        remoteResolved.push({
-          id: attempt.pointer.post_id,
-          from_public_pi: attempt.pointer.from_public_pi ?? attempt.data.from_public_pi,
-          to_scope: 'shared', content: attempt.data.content,
-          content_type: attempt.data.content_type ?? attempt.pointer.content_type,
-          name: attempt.pointer.name ?? attempt.data.name,
-          reply_to: null, created_at: attempt.pointer.shared_at, accessed_at: null,
-        });
-      }
-      if (resolvedIds.length) {
-        await pool.query(
-          'UPDATE remote_shares SET accessed_at = $1 WHERE shared_with_public_pi = $2 AND post_id = ANY($3)',
-          [now, publicPi, resolvedIds]
-        );
-      }
-    }
-
-    posts.push(...sharedPosts, ...remoteResolved);
-    posts.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    if (posts.length > limit) posts.length = limit;
+    const posts = await fetchUnreadInbox(publicPi, limit);
 
     const senderPis = [...new Set(posts.map(p => p.from_public_pi).filter(Boolean))];
     const nickMap = new Map();
