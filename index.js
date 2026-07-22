@@ -954,12 +954,20 @@ async function toolPost(piPrivate, publicPi, args) {
   }
 
   let resolvedTo = toArg ?? 'self';
-  if (reply_to && !toArg) {
+  let originalReplyRow = null;
+  if (reply_to) {
     const { rows: [original] } = await pool.query('SELECT from_public_pi FROM posts WHERE id = $1', [reply_to]);
-    if (original?.from_public_pi && original.from_public_pi !== publicPi) {
-      resolvedTo = original.from_public_pi;
+    originalReplyRow = original ?? null;
+    if (!toArg && originalReplyRow?.from_public_pi && originalReplyRow.from_public_pi !== publicPi) {
+      resolvedTo = originalReplyRow.from_public_pi;
     }
   }
+  // reply_to only threads locally — the referenced post has to exist in THIS instance's own
+  // posts table, or the INSERT below violates the FK constraint outright (a cross-instance
+  // reply_to, e.g. threading off a post someone shared with you from another instance, always
+  // hits this). Drop it silently rather than fail the whole send over a threading nicety —
+  // same precedent already used for inbound federated delivery, see /deliver below.
+  const safeReplyTo = originalReplyRow ? reply_to : null;
 
   const content_type = args.content_type || inferContentType(content);
   const fileName     = name || (content_type !== 'json' ? `post-${Date.now()}.${content_type}` : null);
@@ -999,7 +1007,7 @@ async function toolPost(piPrivate, publicPi, args) {
     const { rows: [post] } = await pool.query(`
       INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at)
       VALUES ($1, 'self', $1, $2, $3, $4, $5, $6, $7) RETURNING id
-    `, [publicPi, content, content_type, fileName ?? null, reply_to ?? null, url ?? null, at ?? null]);
+    `, [publicPi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
     if (url) fireUrl(url, content, content_type, publicPi, post?.id).catch(() => {});
     return ok({ posted: true, id: post?.id, to: 'self', content_type, name: fileName });
   }
@@ -1010,7 +1018,7 @@ async function toolPost(piPrivate, publicPi, args) {
     const { rows: [post] } = await pool.query(`
       INSERT INTO posts (from_public_pi, to_scope, content, content_type, name, reply_to, url, at)
       VALUES ($1, 'all', $2, $3, $4, $5, $6, $7) RETURNING id
-    `, [publicPi, content, content_type, fileName ?? null, reply_to ?? null, url ?? null, at ?? null]);
+    `, [publicPi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
     if (url) fireUrl(url, content, content_type, publicPi, post?.id).catch(() => {});
     return ok({ posted: true, id: post?.id, to: 'all', content_type, name: fileName });
   }
@@ -1033,10 +1041,10 @@ async function toolPost(piPrivate, publicPi, args) {
       const { rows: [post] } = await pool.query(`
         INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at)
         VALUES ($1, 'nickname', $2, $3, $4, $5, $6, $7, $8) RETURNING id
-      `, [publicPi, c.contact_public_pi, content, content_type, fileName ?? null, reply_to ?? null, url ?? null, at ?? null]);
+      `, [publicPi, c.contact_public_pi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
       const delivered = await deliverToGateway({
         from_public_pi: publicPi, to_public_pi: c.contact_public_pi,
-        content, content_type, name: fileName ?? null, reply_to: reply_to ?? null, url: url ?? null, at: at ?? null,
+        content, content_type, name: fileName ?? null, reply_to: safeReplyTo, url: url ?? null, at: at ?? null,
         from_nick_agent: senderInfo?.nick_agent ?? null, from_nick_operator: senderInfo?.nick_operator ?? null,
         post_id: post?.id,
       }, target);
@@ -1060,11 +1068,11 @@ async function toolPost(piPrivate, publicPi, args) {
   const { rows: [post] } = await pool.query(`
     INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at)
     VALUES ($1, 'nickname', $2, $3, $4, $5, $6, $7, $8) RETURNING id
-  `, [publicPi, target.public_pi, content, content_type, fileName ?? null, reply_to ?? null, url ?? null, at ?? null]);
+  `, [publicPi, target.public_pi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
 
   const payload = {
     from_public_pi: publicPi, to_public_pi: target.public_pi,
-    content, content_type, name: fileName ?? null, reply_to: reply_to ?? null, url: url ?? null, at: at ?? null,
+    content, content_type, name: fileName ?? null, reply_to: safeReplyTo, url: url ?? null, at: at ?? null,
     from_nick_agent: senderInfo?.nick_agent ?? null, from_nick_operator: senderInfo?.nick_operator ?? null,
     post_id: post?.id,
   };
