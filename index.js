@@ -23,6 +23,7 @@ const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 const VAULT            = process.env.VAULT_URL ?? 'http://localhost:3151';
 const VAULT_SERVICE_KEY = process.env.VAULT_SERVICE_KEY;
+const PIR_SERVICE_KEY   = process.env.PIR_SERVICE_KEY;
 
 const PRIVATE_PI_RE = /^3\.14\d{18}$/;
 const PUBLIC_PI_RE  = /^3\.14\d{10}$/;
@@ -123,6 +124,17 @@ function passesLocalKeyPolicy(validated) {
 
 async function pirLookup(publicPi) {
   const r = await fetch(`${PIR}/id?id=${encodeURIComponent(publicPi)}`);
+  return r.ok ? r.json() : null;
+}
+
+// Server-to-server variant of pirLookup — presents PIR_SERVICE_KEY to get behaviors/
+// personality back too (the public /id route strips those since they can hold webhook
+// URLs etc.). Used only where we need a recipient's own notify config (sendNotifications),
+// never anywhere a result could flow back out to an end user.
+async function pirLookupInternal(publicPi) {
+  const r = await fetch(`${PIR}/id?id=${encodeURIComponent(publicPi)}`, {
+    headers: { 'X-Pir-Service-Key': PIR_SERVICE_KEY },
+  });
   return r.ok ? r.json() : null;
 }
 
@@ -408,7 +420,7 @@ async function deliverToUrl(payload, url) {
 async function sendNotifications(recipientPi, payload) {
   if (!recipientPi) return;
   try {
-    const pirRecord   = await pirLookup(recipientPi);
+    const pirRecord   = await pirLookupInternal(recipientPi);
     const beh         = pirRecord?.behaviors ?? {};
     const slackUrl    = beh.notify_slack;
     const notifyEmail = beh.notify_email;
