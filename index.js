@@ -6,7 +6,7 @@ import express from 'express';
 import multer  from 'multer';
 import fs      from 'fs';
 import path    from 'path';
-import { randomUUID, randomBytes, createHash } from 'crypto';
+import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'crypto';
 import pg      from 'pg';
 import { safeFetch } from './ssrfGuard.js';
 
@@ -14,7 +14,9 @@ const { Pool } = pg;
 const pool   = new Pool({ connectionString: process.env.GW_DB_URL });
 const app    = express();
 app.disable('x-powered-by');
-const upload = multer();
+const upload = multer({
+  limits: { fileSize: 15 * 1024 * 1024, files: 10, fields: 50, fieldSize: 2 * 1024 * 1024 },
+});
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
@@ -1901,9 +1903,57 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
 
 // ── Mailgun inbound email endpoint ────────────────────────────────────────────
 
+// Verifies Mailgun's HTTP webhook signature (timestamp+token HMAC'd with the
+// account's signing key - distinct from MAILGUN_API_KEY, found in Mailgun's
+// dashboard under Settings > Security > HTTP webhook signing key). Without this,
+// POST /mail/:nick accepted a fabricated sender/subject/body from anyone on the
+// internet who knew or guessed a nickname - the likely actual root cause class
+// behind the "two days of phishing spam" incident (fixed then was the dead Edd
+// poll loop, a symptom, not this open front door). Found by the 30 Jul Fable audit,
+// group C. MAILGUN_SIGNING_KEY isn't set yet - logs a loud warning and skips
+// verification until it is, rather than guessing at a value and risking silently
+// dropping real inbound mail; set the env var and this activates with no redeploy.
+function verifyMailgunSignature(form) {
+  const signingKey = process.env.MAILGUN_SIGNING_KEY;
+  if (!signingKey) {
+    console.warn('[mail] MAILGUN_SIGNING_KEY not set - inbound email signature NOT verified');
+    return true;
+  }
+  const { timestamp, token, signature } = form;
+  if (!timestamp || !token || !signature) return false;
+  const ts = parseInt(timestamp, 10);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > 300) return false;
+  const expectedHex = createHmac('sha256', signingKey).update(timestamp + token).digest('hex');
+  const expected = Buffer.from(expectedHex, 'hex');
+  const actual = Buffer.from(String(signature), 'hex');
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
+}
+
+// Basic per-IP rate limit, in-memory (single Node process, resets on restart -
+// sufficient given this is a hardening measure, not the primary auth control).
+const mailRateLimit = new Map();
+function checkMailRateLimit(ip) {
+  const now = Date.now();
+  const entry = mailRateLimit.get(ip);
+  if (!entry || now > entry.resetAt) {
+    mailRateLimit.set(ip, { count: 1, resetAt: now + 10 * 60 * 1000 });
+    return true;
+  }
+  if (entry.count >= 30) return false;
+  entry.count += 1;
+  return true;
+}
+
 app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
+  const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
+  if (!checkMailRateLimit(clientIp)) return res.status(429).json({ error: 'Too many requests' });
+
   const nick   = req.params.nick;
   const form   = req.body ?? {};
+
+  if (!verifyMailgunSignature(form)) return res.status(401).json({ error: 'Invalid signature' });
+
   const sender = form.sender ?? '';
   const from   = form.from   ?? sender;
   const subject = form.subject ?? '';
