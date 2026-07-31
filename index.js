@@ -2349,8 +2349,22 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
   const validated = await validateWithKey(entry.piPrivate, accessKey);
   if (!validated?.valid) return res.status(401).json({ error: 'invalid_client' });
 
-  const token = accessKey ? `${entry.piPrivate}|${accessKey}` : entry.piPrivate;
-  res.json({ access_token: token, token_type: 'Bearer', expires_in: 7776000 });
+  // 31 Jul 2026: access_token is now opaque - a random value stored (hashed) server-side
+  // against the real credential, not the credential itself re-encoded. The old format
+  // (piPrivate, optionally |accessKey) was indistinguishable from a full credential leak,
+  // never actually expired despite advertising expires_in (re-validated by re-deriving the
+  // credential on every call), and had no revocation path short of re-registering identity.
+  // Hard cutover, no legacy-format fallback - any existing OAuth-connected client needs to
+  // reconnect once (Payne's Gateway/pi-dev connector, if any, per Paul 31 Jul 2026).
+  const expiresInSec = 7776000;
+  const rawToken = 'gwt_' + randomBytes(32).toString('hex');
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  await pool.query(
+    `INSERT INTO oauth_tokens (token_hash, pi_private, access_key, expires_at)
+     VALUES ($1, $2, $3, now() + ($4 || ' seconds')::interval)`,
+    [tokenHash, entry.piPrivate, accessKey, String(expiresInSec)]
+  );
+  res.json({ access_token: rawToken, token_type: 'Bearer', expires_in: expiresInSec });
 });
 
 // ── Real MCP endpoint (/tools — inner, auth-required server) ───────────────────
@@ -2367,9 +2381,15 @@ app.post(`${PREFIX}/tools`, async (req, res) => {
     const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
       ? req.headers['authorization'].slice(7) : null;
     if (bearer) {
-      const parts = bearer.split('|');
-      piPrivate = parts[0].trim() || null;
-      if (parts[1] && !accessKey) accessKey = parts[1].trim() || null;
+      const tokenHash = createHash('sha256').update(bearer).digest('hex');
+      const { rows: tokenRows } = await pool.query(
+        'SELECT pi_private, access_key FROM oauth_tokens WHERE token_hash = $1 AND expires_at > now() AND revoked_at IS NULL',
+        [tokenHash]
+      );
+      if (tokenRows[0]) {
+        piPrivate = tokenRows[0].pi_private;
+        accessKey = tokenRows[0].access_key;
+      }
     }
   }
   const body = req.body;
