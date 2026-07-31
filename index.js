@@ -23,6 +23,14 @@ const PREFIX           = '/gateway';
 const GATEWAY_VERSION  = '3.7.1';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
+// PIR is same-box (127.0.0.1:3146) but pirValidate() previously went out through the
+// public Caddy-proxied URL for every single identity check - a real, avoidable round
+// trip, and the reason the loopback-exempt rate-limit fix (same day, PIR/index.js)
+// didn't fully hold: Caddy sets X-Forwarded-For on its hop back in, which the rate
+// limiter reads before falling back to the raw (actually-loopback) socket address, so
+// this specific path wasn't reliably recognized as loopback. Calling PIR directly here
+// removes the ambiguity entirely, same pattern VAULT already used.
+const PIR_INTERNAL     = process.env.PIR_INTERNAL_URL ?? 'http://127.0.0.1:3146/pir';
 const VAULT            = process.env.VAULT_URL ?? 'http://localhost:3151';
 const VAULT_SERVICE_KEY = process.env.VAULT_SERVICE_KEY;
 const PIR_SERVICE_KEY   = process.env.PIR_SERVICE_KEY;
@@ -83,7 +91,7 @@ function inferContentType(content) {
 // ── PIR ───────────────────────────────────────────────────────────────────────
 
 async function pirValidate(piPrivate) {
-  const r = await fetch(`${PIR}/validate`, {
+  const r = await fetch(`${PIR_INTERNAL}/validate`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', 'X-Pi-Private': piPrivate },
   });
@@ -2388,6 +2396,7 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
 app.post(`${PREFIX}/tools`, async (req, res) => {
   let piPrivate = req.headers['x-pi-private'] ?? null;
   let accessKey = req.headers['x-pi-access-key'] ?? null;
+  let authDiag = 'x-pi-private-header';
   if (!piPrivate) {
     const bearer = (req.headers['authorization'] ?? '').startsWith('Bearer ')
       ? req.headers['authorization'].slice(7) : null;
@@ -2400,9 +2409,20 @@ app.post(`${PREFIX}/tools`, async (req, res) => {
       if (tokenRows[0]) {
         piPrivate = tokenRows[0].pi_private;
         accessKey = tokenRows[0].access_key;
+        authDiag = `bearer-matched hash=${tokenHash.slice(0, 10)}`;
+      } else {
+        authDiag = `bearer-NO-MATCH hash=${tokenHash.slice(0, 10)} prefix=${bearer.slice(0, 6)}`;
       }
+    } else {
+      authDiag = 'no-credential-at-all';
     }
   }
+  // Temporary diagnostic for the 31 Jul 2026 Cloot no_identity investigation - a bearer
+  // token round-tripped through the OAuth flow correctly but toolSet() still returned
+  // no_identity for reasons not reproducible via direct testing. Logs enough to tell
+  // which of the three paths (header / bearer-matched / bearer-no-match / no-credential)
+  // a real failing request actually took, without logging the credential itself.
+  console.log(`[auth-diag] ${req.method} /tools auth=${authDiag} piPrivateOk=${!!(piPrivate && PRIVATE_PI_RE.test(piPrivate))}`);
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   if (body.method?.startsWith('notifications/')) return res.status(202).end();
