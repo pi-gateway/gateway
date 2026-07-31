@@ -2393,6 +2393,24 @@ app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req,
 // registered below) is meant to be open; this route isn't. This is also where the
 // OAuth 401/browser-credential-page challenge fires — the outer relay never 401s of
 // its own accord, it just passes this one through when it happens.
+// 31 Jul 2026: GET /tools had no route at all - fell through to Express's generic 404
+// page (no <link rel="icon">, nothing usable for discovery). /tools is architecturally
+// the real OAuth-protected resource here (it's what issues the 401 + WWW-Authenticate
+// challenge pointing at the OAuth metadata, per RFC 9728 protected-resource-metadata
+// flow) - if Claude's connector-icon discovery associates the icon with whichever URL
+// actually triggered that auth challenge, rather than the bare /3.14 relay root, this
+// was the real gap the last two attempts didn't cover. Mirrors rootHandler's discovery
+// page exactly; GET has no other legitimate use on this route (only POST /tools is
+// real MCP traffic), so no Accept-based branching needed here.
+app.get(`${PREFIX}/tools`, (req, res) => {
+  const publicUrl = process.env.GATEWAY_PUBLIC_URL ?? selfUrl();
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>π Gateway</title>
+<link rel="icon" type="image/x-icon" href="${publicUrl}/favicon.ico">
+<link rel="shortcut icon" href="${publicUrl}/favicon.ico">
+</head><body></body></html>`);
+});
+
 app.post(`${PREFIX}/tools`, async (req, res) => {
   let piPrivate = req.headers['x-pi-private'] ?? null;
   let accessKey = req.headers['x-pi-access-key'] ?? null;
