@@ -2449,7 +2449,31 @@ function handleSse(req, res) {
 // Streamable HTTP transport expects this. Previously fell through to a plain 404 since
 // the old GET landing page was removed - a stronger negative signal than a working
 // stream. Reuses the same handler as /sse below.
-app.get(`${PREFIX}`, handleSse);
+//
+// One exception: Claude's connector-icon discovery does a plain GET for this same URL
+// and, per Saga's working reference implementation, expects real HTML with a
+// <link rel="icon"> tag to resolve the favicon from - not a blind fetch of /favicon.ico.
+// (Adding the favicon.ico route alone, 31 Jul 2026, did not fix the "still shows p"
+// report - this was the actual missing piece.) A real Streamable-HTTP MCP client always
+// sends Accept: text/event-stream when opening this stream per spec, so branch on that
+// rather than guessing from user-agent - anything that does NOT ask for event-stream but
+// does ask for html gets the discovery page instead of hijacking its SSE connection.
+function wantsHtmlNotSse(req) {
+  const accept = String(req.headers.accept || '');
+  return accept.includes('text/html') && !accept.includes('text/event-stream');
+}
+function rootHandler(req, res) {
+  if (wantsHtmlNotSse(req)) {
+    const publicUrl = process.env.GATEWAY_PUBLIC_URL ?? selfUrl();
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>π Gateway</title>
+<link rel="icon" type="image/x-icon" href="${publicUrl}/favicon.ico">
+<link rel="shortcut icon" href="${publicUrl}/favicon.ico">
+</head><body></body></html>`);
+  }
+  return handleSse(req, res);
+}
+app.get(`${PREFIX}`, rootHandler);
 
 app.get(`${PREFIX}/sse`, handleSse);
 
