@@ -1739,6 +1739,17 @@ app.use((req, res, next) => {
 
 // ── Health ────────────────────────────────────────────────────────────────────
 
+// Served from this same origin/path (pitr.network/3.14/favicon.ico), not the sibling
+// Caddy-static site at the bare domain root - matches Saga's own pattern (favicon lives
+// on the same Worker that serves /tools, not a different service that happens to share
+// a hostname). Paul found Claude's connector-icon fetch wasn't picking up the bare-domain
+// favicon for exactly this reason - it's resolving relative to the connector URL itself.
+app.get(`${PREFIX}/favicon.ico`, (req, res) => {
+  res.sendFile(path.join(process.cwd(), 'favicon.ico'), (err) => {
+    if (err && !res.headersSent) res.status(404).end();
+  });
+});
+
 app.get(`${PREFIX}/health`, (req, res) =>
   res.json({ status: 'ok', service: 'pi-gateway', version: GATEWAY_VERSION, protocol_version: PROTOCOL_VERSION })
 );
