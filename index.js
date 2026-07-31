@@ -373,14 +373,37 @@ async function resolveRecipient(to) {
 
 // ── Deliver to remote gateway ─────────────────────────────────────────────────
 
+// Federation auth (30 Jul Fable audit, group A high finding): /deliver, /shared/notify,
+// and /shared/resolve accepted unauthenticated POSTs from the open internet - anyone could
+// inject spoofed messages or feed a fabricated origin_gateway_mcp into the SSRF-relevant
+// fetchRemoteShare path. Real cross-instance trust (a Registry-backed allowlist or per-instance
+// key exchange) is Phase 3 work - today there are exactly two real instances (this Gateway and
+// pi-dev), both operated by the same party, so a single shared secret between them closes the
+// actual live gap without building speculative multi-party infrastructure for a federation
+// model that hasn't shipped yet. Revisit when a real third-party instance federates.
+function signFederationBody(bodyStr) {
+  return createHmac('sha256', process.env.FEDERATION_SHARED_SECRET).update(bodyStr).digest('hex');
+}
+
+function verifyFederationRequest(req) {
+  const sig = req.headers['x-federation-signature'];
+  if (!sig || !req.rawBody) return false;
+  const expectedHex = signFederationBody(req.rawBody);
+  const expected = Buffer.from(expectedHex, 'hex');
+  const actual = Buffer.from(String(sig), 'hex');
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
+}
+
 async function deliverToGateway(payload, target) {
   if (!target.gateway_mcp) return false;
   const deliverUrl = target.gateway_mcp.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
   try {
+    const bodyStr = JSON.stringify(payload);
     const r = await safeFetch(deliverUrl, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json', 'X-Federation-Signature': signFederationBody(bodyStr) },
+      body:    bodyStr,
     });
     if (!r.ok) {
       const body = await r.text().catch(() => '');
@@ -397,10 +420,11 @@ async function deliverToUrl(payload, url) {
   if (!url) return false;
   const deliverUrl = url.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
   try {
+    const bodyStr = JSON.stringify(payload);
     const r = await safeFetch(deliverUrl, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json', 'X-Federation-Signature': signFederationBody(bodyStr) },
+      body:    bodyStr,
     });
     if (!r.ok) {
       const body = await r.text().catch(() => '');
@@ -1251,13 +1275,14 @@ async function toolShare(piPrivate, publicPi, name, toArg) {
   let delivered = false;
   try {
     const notifyUrl = normalize(target.gateway_mcp).replace(/\/mcp$/, '') + '/shared/notify';
-    const r = await fetch(notifyUrl, {
+    const notifyBodyStr = JSON.stringify({
+      post_id: original.id, origin_gateway_mcp: selfUrl(), shared_with_public_pi: target.public_pi,
+      from_public_pi: publicPi, name, content_type: original.content_type,
+    });
+    const r = await safeFetch(notifyUrl, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        post_id: original.id, origin_gateway_mcp: selfUrl(), shared_with_public_pi: target.public_pi,
-        from_public_pi: publicPi, name, content_type: original.content_type,
-      }),
+      headers: { 'Content-Type': 'application/json', 'X-Federation-Signature': signFederationBody(notifyBodyStr) },
+      body: notifyBodyStr,
     });
     delivered = r.ok;
   } catch { /* best effort — the grant still exists here; resolve stays reachable regardless */ }
@@ -1288,10 +1313,11 @@ async function resolveSharedPost(postId, sharedWithPublicPi) {
 async function fetchRemoteShare(originGatewayMcp, postId, sharedWithPublicPi) {
   try {
     const resolveUrl = originGatewayMcp.replace(/\/$/, '').replace(/\/mcp$/, '') + '/shared/resolve';
+    const resolveBodyStr = JSON.stringify({ post_id: postId, shared_with_public_pi: sharedWithPublicPi });
     const r = await safeFetch(resolveUrl, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ post_id: postId, shared_with_public_pi: sharedWithPublicPi }),
+      headers: { 'Content-Type': 'application/json', 'X-Federation-Signature': signFederationBody(resolveBodyStr) },
+      body: resolveBodyStr,
     });
     if (!r.ok) return null;
     return await r.json();
@@ -1697,7 +1723,9 @@ async function handleOuter(req, res) {
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); },
+}));
 
 app.use(express.urlencoded({ extended: true }));
 
@@ -1718,6 +1746,7 @@ app.get(`${PREFIX}/health`, (req, res) =>
 // ── Deliver — inbound from other gateways ────────────────────────────────────
 
 app.post(`${PREFIX}/deliver`, async (req, res) => {
+  if (!verifyFederationRequest(req)) return res.status(401).json({ error: 'Invalid federation signature' });
   const body = req.body;
   if (!body?.to_public_pi || !body?.content) {
     return res.status(400).json({ error: 'to_public_pi and content required' });
@@ -1730,8 +1759,11 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
     if (normalize(pirRecord.gateway_mcp) !== normalize(selfUrl())) {
       const deliverUrl = pirRecord.gateway_mcp.replace(/\/$/, '') + '/deliver';
       try {
+        const forwardBodyStr = JSON.stringify(body);
         const r = await safeFetch(deliverUrl, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Federation-Signature': signFederationBody(forwardBodyStr) },
+          body: forwardBodyStr,
         });
         if (r.ok) return res.json({ ok: true, forwarded: true });
         const errBody = await r.text().catch(() => '');
@@ -1792,6 +1824,7 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
 // Content only ever lives on the instance that originally stored it.
 
 app.post(`${PREFIX}/shared/notify`, async (req, res) => {
+  if (!verifyFederationRequest(req)) return res.status(401).json({ error: 'Invalid federation signature' });
   const { post_id, origin_gateway_mcp, shared_with_public_pi, from_public_pi, name, content_type } = req.body || {};
   if (!post_id || !origin_gateway_mcp || !shared_with_public_pi) {
     return res.status(400).json({ error: 'post_id, origin_gateway_mcp, shared_with_public_pi required' });
@@ -1812,6 +1845,7 @@ app.post(`${PREFIX}/shared/notify`, async (req, res) => {
 });
 
 app.post(`${PREFIX}/shared/resolve`, async (req, res) => {
+  if (!verifyFederationRequest(req)) return res.status(401).json({ error: 'Invalid federation signature' });
   const { post_id, shared_with_public_pi } = req.body || {};
   if (!post_id || !shared_with_public_pi) {
     return res.status(400).json({ error: 'post_id, shared_with_public_pi required' });
