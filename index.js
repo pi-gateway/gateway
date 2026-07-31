@@ -377,7 +377,7 @@ async function deliverToGateway(payload, target) {
   if (!target.gateway_mcp) return false;
   const deliverUrl = target.gateway_mcp.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
   try {
-    const r = await fetch(deliverUrl, {
+    const r = await safeFetch(deliverUrl, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(payload),
@@ -397,7 +397,7 @@ async function deliverToUrl(payload, url) {
   if (!url) return false;
   const deliverUrl = url.replace(/\/mcp$/, '').replace(/\/$/, '') + '/deliver';
   try {
-    const r = await fetch(deliverUrl, {
+    const r = await safeFetch(deliverUrl, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(payload),
@@ -1288,7 +1288,7 @@ async function resolveSharedPost(postId, sharedWithPublicPi) {
 async function fetchRemoteShare(originGatewayMcp, postId, sharedWithPublicPi) {
   try {
     const resolveUrl = originGatewayMcp.replace(/\/$/, '').replace(/\/mcp$/, '') + '/shared/resolve';
-    const r = await fetch(resolveUrl, {
+    const r = await safeFetch(resolveUrl, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ post_id: postId, shared_with_public_pi: sharedWithPublicPi }),
@@ -1730,7 +1730,7 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
     if (normalize(pirRecord.gateway_mcp) !== normalize(selfUrl())) {
       const deliverUrl = pirRecord.gateway_mcp.replace(/\/$/, '') + '/deliver';
       try {
-        const r = await fetch(deliverUrl, {
+        const r = await safeFetch(deliverUrl, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
         });
         if (r.ok) return res.json({ ok: true, forwarded: true });
