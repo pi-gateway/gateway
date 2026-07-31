@@ -1698,7 +1698,7 @@ async function handleOuter(req, res) {
 app.use(express.json());
 
 app.use(express.urlencoded({ extended: true }));
-app.use((req, res, next) => { const t0=Date.now(); res.on('finish', () => { if (req.headers['user-agent'] === 'Claude-User' || String(req.originalUrl).includes('authorize') || String(req.originalUrl).includes('token') || String(req.originalUrl).includes('register')) { console.log('[DIAG2] ' + new Date().toISOString() + ' ' + req.method + ' ' + req.originalUrl + ' status=' + res.statusCode + ' ua=' + req.headers['user-agent'] + ' body=' + JSON.stringify(req.body) + ' took=' + (Date.now()-t0) + 'ms'); } }); next(); });
+
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pi-Private, X-Pi-Access-Key');
