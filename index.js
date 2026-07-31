@@ -2283,7 +2283,24 @@ app.get(`${PREFIX}/authorize`, (req, res) => {
   res.send(connectPage(redirect_uri, state, code_challenge));
 });
 
+// Basic per-IP rate limit, in-memory (30 Jul Fable audit, group A medium finding: no
+// throttling on either OAuth endpoint against the private-pi credential space).
+const oauthRateLimit = new Map();
+function checkOauthRateLimit(ip) {
+  const now = Date.now();
+  const entry = oauthRateLimit.get(ip);
+  if (!entry || now > entry.resetAt) {
+    oauthRateLimit.set(ip, { count: 1, resetAt: now + 10 * 60 * 1000 });
+    return true;
+  }
+  if (entry.count >= 20) return false;
+  entry.count += 1;
+  return true;
+}
+
 app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (req, res) => {
+  const authIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
+  if (!checkOauthRateLimit(authIp)) return res.status(429).send('Too many requests');
   const { pi_key, access_key, redirect_uri, state, code_challenge } = req.body ?? {};
   if (!pi_key || !redirect_uri) return res.status(400).send('Missing required fields');
 
@@ -2314,6 +2331,8 @@ app.post(`${PREFIX}/authorize`, express.urlencoded({ extended: false }), async (
 });
 
 app.post(`${PREFIX}/token`, express.urlencoded({ extended: false }), async (req, res) => {
+  const tokenIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
+  if (!checkOauthRateLimit(tokenIp)) return res.status(429).json({ error: 'too_many_requests' });
   const { grant_type, code, code_verifier, client_secret } = req.body ?? {};
   if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
 
