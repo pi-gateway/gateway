@@ -2478,9 +2478,18 @@ function handleSse(req, res) {
 // sends Accept: text/event-stream when opening this stream per spec, so branch on that
 // rather than guessing from user-agent - anything that does NOT ask for event-stream but
 // does ask for html gets the discovery page instead of hijacking its SSE connection.
+// 31 Jul 2026, second pass: originally required an explicit "text/html" in Accept before
+// serving the discovery page, defaulting to SSE otherwise - too strict. A real
+// Streamable-HTTP MCP client is required by spec to explicitly send
+// Accept: text/event-stream when opening this stream, so that's the one signal worth
+// trusting; anything that does NOT include it (Accept: */*, no header at all, or an
+// explicit text/html) almost certainly isn't a real SSE client and should get the fast,
+// parseable discovery page instead of an indefinitely-open stream it never reads from -
+// which was likely why Claude's own connector-icon crawler (whatever Accept it actually
+// sends) never got HTML back under the first version of this fix.
 function wantsHtmlNotSse(req) {
   const accept = String(req.headers.accept || '');
-  return accept.includes('text/html') && !accept.includes('text/event-stream');
+  return !accept.includes('text/event-stream');
 }
 function rootHandler(req, res) {
   if (wantsHtmlNotSse(req)) {
