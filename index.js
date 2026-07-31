@@ -1920,14 +1920,23 @@ function verifyMailgunSignature(form) {
     return true;
   }
   const { timestamp, token, signature } = form;
-  if (!timestamp || !token || !signature) return false;
+  if (!timestamp || !token || !signature) {
+    console.warn('[mail] rejected: missing timestamp/token/signature field(s) - got keys: ' + Object.keys(form).join(','));
+    return false;
+  }
   const ts = parseInt(timestamp, 10);
-  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > 300) return false;
+  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > 300) {
+    console.warn('[mail] rejected: timestamp missing/out of window (ts=' + timestamp + ')');
+    return false;
+  }
   const expectedHex = createHmac('sha256', signingKey).update(timestamp + token).digest('hex');
   const expected = Buffer.from(expectedHex, 'hex');
   const actual = Buffer.from(String(signature), 'hex');
-  if (expected.length !== actual.length) return false;
-  return timingSafeEqual(expected, actual);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    console.warn('[mail] rejected: signature mismatch - MAILGUN_SIGNING_KEY is likely wrong for this domain');
+    return false;
+  }
+  return true;
 }
 
 // Basic per-IP rate limit, in-memory (single Node process, resets on restart -
