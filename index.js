@@ -1938,6 +1938,75 @@ app.post(`${PREFIX}/contact/:nick`, async (req, res) => {
 // group C. MAILGUN_SIGNING_KEY isn't set yet - logs a loud warning and skips
 // verification until it is, rather than guessing at a value and risking silently
 // dropping real inbound mail; set the env var and this activates with no redeploy.
+// Signed, expiring attachment links (30 Jul Fable audit, group C blocker) -
+// attachments used to be written straight into /var/www/endandit.nl/uploads/,
+// a public, unauthenticated, permanent path served by Caddy's static file_server.
+// Now stored entirely outside any web-served directory; the only way to reach
+// one is through this route with a valid, unexpired, HMAC-signed token embedding
+// the filename - moving the file off disk-based static serving closes the whole
+// class of risk (including "some future static-serving misconfiguration exposes
+// this too", the exact way Scoper's DB got exposed).
+const ATTACHMENTS_DIR = '/var/lib/gateway-attachments';
+const ATTACHMENT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function signAttachmentToken(filename) {
+  const payload = `${filename}:${Date.now() + ATTACHMENT_TTL_MS}`;
+  const payloadB64 = Buffer.from(payload).toString('base64url');
+  const sig = createHmac('sha256', process.env.ATTACHMENT_SIGNING_SECRET).update(payloadB64).digest('hex');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifyAttachmentToken(token) {
+  const dot = String(token || '').lastIndexOf('.');
+  if (dot < 0) return null;
+  const payloadB64 = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expectedSig = createHmac('sha256', process.env.ATTACHMENT_SIGNING_SECRET).update(payloadB64).digest('hex');
+  const expected = Buffer.from(expectedSig, 'hex');
+  const actual = Buffer.from(sig, 'hex');
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
+  let payload;
+  try { payload = Buffer.from(payloadB64, 'base64url').toString('utf8'); } catch { return null; }
+  const idx = payload.lastIndexOf(':');
+  if (idx < 0) return null;
+  const filename = payload.slice(0, idx);
+  const expiry = parseInt(payload.slice(idx + 1), 10);
+  if (!Number.isFinite(expiry) || Date.now() > expiry) return null;
+  // Filenames are always our own randomUUID()-prefixed strings - reject anything
+  // that isn't, as defense in depth against a malformed/forged token.
+  if (!/^[a-f0-9-]{36}-[a-zA-Z0-9._-]+$/.test(filename)) return null;
+  return filename;
+}
+
+app.get(`${PREFIX}/attachments/:token`, (req, res) => {
+  const filename = verifyAttachmentToken(req.params.token);
+  if (!filename) return res.status(404).json({ error: 'Not found or expired' });
+  const filePath = path.join(ATTACHMENTS_DIR, filename);
+  res.sendFile(filePath, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: 'Not found' });
+  });
+});
+
+// Retention: delete attachment files past their TTL from disk, not just
+// past the point where their signed link would still verify - actually
+// bounds exposure rather than just gating access to it. Runs on startup and
+// every 6h thereafter.
+function cleanupExpiredAttachments() {
+  fs.readdir(ATTACHMENTS_DIR, (err, files) => {
+    if (err) return; // directory may not exist yet - fine, nothing to clean
+    const cutoff = Date.now() - ATTACHMENT_TTL_MS;
+    for (const f of files) {
+      const filePath = path.join(ATTACHMENTS_DIR, f);
+      fs.stat(filePath, (statErr, stat) => {
+        if (statErr) return;
+        if (stat.mtimeMs < cutoff) fs.unlink(filePath, () => {});
+      });
+    }
+  });
+}
+setInterval(cleanupExpiredAttachments, 6 * 60 * 60 * 1000);
+cleanupExpiredAttachments();
+
 function verifyMailgunSignature(form) {
   const signingKey = process.env.MAILGUN_SIGNING_KEY;
   if (!signingKey) {
@@ -2008,14 +2077,14 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   const files = (req.files ?? []).filter(f => f.fieldname.startsWith('attachment'));
   if (files.length) {
     try {
-      const uploadDir = '/var/www/endandit.nl/uploads';
-      fs.mkdirSync(uploadDir, { recursive: true });
+      fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
       const attachLines = ['', '**Attachments:**'];
       for (const file of files) {
         const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
         const filename = `${randomUUID()}-${safeName}`;
-        fs.writeFileSync(path.join(uploadDir, filename), file.buffer);
-        attachLines.push(`- [${file.originalname}](https://endandit.nl/uploads/${filename})`);
+        fs.writeFileSync(path.join(ATTACHMENTS_DIR, filename), file.buffer);
+        const token = signAttachmentToken(filename);
+        attachLines.push(`- [${file.originalname}](${selfUrl()}/attachments/${token}) (link expires in 30 days)`);
       }
       lines.push(attachLines.join('\n'));
     } catch (e) {
