@@ -285,14 +285,33 @@ async function getAmbient(publicPi) {
 // during the session-rhythm text rewrite): reading a rule once at boot doesn't keep it live
 // against later casual turns, no matter how clearly it's worded - re-surfacing it on every real
 // call does, without needing the calling agent to remember anything on its own.
-async function getLastLogAgeDays(publicPi) {
+async function getLastLogInfo(publicPi) {
   const { rows } = await pool.query(`
     SELECT created_at FROM posts
     WHERE from_public_pi = $1 AND to_scope = 'self' AND content_type = 'md' AND name ILIKE 'log_%'
     ORDER BY created_at DESC LIMIT 1
   `, [publicPi]);
-  if (!rows[0]) return null;
-  return Math.floor((Date.now() - new Date(rows[0].created_at).getTime()) / (1000 * 60 * 60 * 24));
+  if (!rows[0]) return { ageDays: null, createdAt: null };
+  const createdAt = rows[0].created_at;
+  const ageDays = Math.floor((Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24));
+  return { ageDays, createdAt };
+}
+
+// Cumulative gate (25 Aug 2026, same day, Saga's own feedback on the identical mechanism):
+// firing the nudge on every single call, including harmless read-only browsing, was real noise
+// - the same over-logging shape already addressed once in the session-rhythm text, recurring at
+// the mechanical layer instead of the agent's own judgment. browse() is pi's only read-only base
+// verb (post/mount/anything mounted always represents a real action worth remembering), so it's
+// the only one worth gating - and only when nothing new has actually happened since the last
+// log. Reuses the existing posts table rather than a new audit log, unlike Saga's fix - pi's
+// call volume doesn't justify one the way Saga's did.
+async function hasActivitySinceLog(publicPi, lastLogCreatedAt) {
+  if (!lastLogCreatedAt) return true;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM posts WHERE from_public_pi = $1 AND created_at > $2 LIMIT 1`,
+    [publicPi, lastLogCreatedAt]
+  );
+  return rows.length > 0;
 }
 
 function buildCheckNote(ambient, lastLogAgeDays) {
@@ -1626,12 +1645,13 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
         }
         try {
-          const [checkAmbient, lastLogAgeDays] = await Promise.all([
+          const [checkAmbient, lastLogInfo] = await Promise.all([
             getAmbient(publicPi),
-            getLastLogAgeDays(publicPi),
+            getLastLogInfo(publicPi),
           ]);
-          if (result?.content) {
-            result.content.push({ type: 'text', text: buildCheckNote(checkAmbient, lastLogAgeDays) });
+          const shouldNudge = toolName !== 'browse' || await hasActivitySinceLog(publicPi, lastLogInfo.createdAt);
+          if (shouldNudge && result?.content) {
+            result.content.push({ type: 'text', text: buildCheckNote(checkAmbient, lastLogInfo.ageDays) });
           }
         } catch (e) {
           console.error('[mcp] check-nudge error:', e);
