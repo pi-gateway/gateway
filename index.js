@@ -287,14 +287,14 @@ async function getAmbient(publicPi) {
 // call does, without needing the calling agent to remember anything on its own.
 async function getLastLogInfo(publicPi) {
   const { rows } = await pool.query(`
-    SELECT created_at FROM posts
+    SELECT id, created_at FROM posts
     WHERE from_public_pi = $1 AND to_scope = 'self' AND content_type = 'md' AND name ILIKE 'log_%'
     ORDER BY created_at DESC LIMIT 1
   `, [publicPi]);
-  if (!rows[0]) return { ageDays: null, createdAt: null };
+  if (!rows[0]) return { ageDays: null, createdAt: null, id: null };
   const createdAt = rows[0].created_at;
   const ageDays = Math.floor((Date.now() - new Date(createdAt).getTime()) / (1000 * 60 * 60 * 24));
-  return { ageDays, createdAt };
+  return { ageDays, createdAt, id: rows[0].id };
 }
 
 // Cumulative gate (25 Aug 2026, same day, Saga's own feedback on the identical mechanism):
@@ -305,11 +305,16 @@ async function getLastLogInfo(publicPi) {
 // the only one worth gating - and only when nothing new has actually happened since the last
 // log. Reuses the existing posts table rather than a new audit log, unlike Saga's fix - pi's
 // call volume doesn't justify one the way Saga's did.
-async function hasActivitySinceLog(publicPi, lastLogCreatedAt) {
+async function hasActivitySinceLog(publicPi, lastLogCreatedAt, lastLogId) {
   if (!lastLogCreatedAt) return true;
+  // id-excluded, not just timestamp-compared: Postgres timestamptz has more precision than a JS
+  // Date can hold, so reading the log's own created_at into a Date and feeding it back into this
+  // comparison can make the log's OWN row spuriously look "newer than itself" once truncated -
+  // found live 25 Aug 2026 (the nudge never actually suppressed after this shipped). Excluding
+  // the log's own id directly sidesteps the precision issue instead of trying to out-precision it.
   const { rows } = await pool.query(
-    `SELECT 1 FROM posts WHERE from_public_pi = $1 AND created_at > $2 LIMIT 1`,
-    [publicPi, lastLogCreatedAt]
+    `SELECT 1 FROM posts WHERE from_public_pi = $1 AND created_at > $2 AND id != $3 LIMIT 1`,
+    [publicPi, lastLogCreatedAt, lastLogId]
   );
   return rows.length > 0;
 }
@@ -1649,7 +1654,7 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
             getAmbient(publicPi),
             getLastLogInfo(publicPi),
           ]);
-          const shouldNudge = toolName !== 'browse' || await hasActivitySinceLog(publicPi, lastLogInfo.createdAt);
+          const shouldNudge = toolName !== 'browse' || await hasActivitySinceLog(publicPi, lastLogInfo.createdAt, lastLogInfo.id);
           if (shouldNudge && result?.content) {
             result.content.push({ type: 'text', text: buildCheckNote(checkAmbient, lastLogInfo.ageDays) });
           }
