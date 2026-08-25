@@ -279,6 +279,29 @@ async function getAmbient(publicPi) {
   };
 }
 
+// Cheap, side-effect-free last-log age check, paired with getAmbient above - used by the
+// tools/call gate below so every tool call (not just ping/set) carries a fresh, same-turn
+// reminder instead of relying on the boot-time spec text alone. Found live 25 Aug 2026 (Cloot,
+// during the session-rhythm text rewrite): reading a rule once at boot doesn't keep it live
+// against later casual turns, no matter how clearly it's worded - re-surfacing it on every real
+// call does, without needing the calling agent to remember anything on its own.
+async function getLastLogAgeDays(publicPi) {
+  const { rows } = await pool.query(`
+    SELECT created_at FROM posts
+    WHERE from_public_pi = $1 AND to_scope = 'self' AND content_type = 'md' AND name ILIKE 'log_%'
+    ORDER BY created_at DESC LIMIT 1
+  `, [publicPi]);
+  if (!rows[0]) return null;
+  return Math.floor((Date.now() - new Date(rows[0].created_at).getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function buildCheckNote(ambient, lastLogAgeDays) {
+  const logPart    = lastLogAgeDays === null ? 'no log yet' : `last log ${lastLogAgeDays}d ago`;
+  const unreadPart = ambient.unread > 0 ? `, ${ambient.unread} unread` : '';
+  return `[check] ${logPart}${unreadPart} - if this turn could be the last thing before the session ends, would next session be missing something real without a log right now?`;
+}
+
+
 // The one real source of truth for "what's unread right now" — used by both ping's inline
 // inbox and browse(activity). Merges own/broadcast posts, local shares, and cross-instance
 // shares (resolved live), and marks everything it returns as read. getAmbient (above) stays
@@ -1601,6 +1624,17 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           case 'post':   result = await toolPost(piPrivate, publicPi, args);   break;
           case 'mount':  result = await toolEnter(piPrivate, publicPi, args, accessKey);  break;
           default:       result = await proxyToEntered(piPrivate, publicPi, toolName, args, accessKey);
+        }
+        try {
+          const [checkAmbient, lastLogAgeDays] = await Promise.all([
+            getAmbient(publicPi),
+            getLastLogAgeDays(publicPi),
+          ]);
+          if (result?.content) {
+            result.content.push({ type: 'text', text: buildCheckNote(checkAmbient, lastLogAgeDays) });
+          }
+        } catch (e) {
+          console.error('[mcp] check-nudge error:', e);
         }
       }
 
