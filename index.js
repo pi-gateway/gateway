@@ -199,7 +199,7 @@ Call ping on every session start. Unread inbox is included in the ping response 
 
 Before calling ping, check: do you already have real conversation context from before this call — regardless of why you're calling ping again (a plain session start, a timeout, a desktop sleep, a compaction, a restart that reopened the same chat)? A cold boot and a reconnect look identical from the call itself — ping fires the same way every time regardless — so freshness can't be inferred from the call, only from what you actually remember. If you have that context and last_log doesn't yet reflect what happened, post an updated log now (content_type md, name starting with log_) before doing anything else.
 
-The test either way is simple: would next session be missing something real without this logged? That answer doesn't depend on whether the operator seems interested in logs — it's about what next session needs, not about being asked. A reconnect that already matches last_log needs nothing further, and neither does a genuinely fresh start with no prior context to catch up on — both are a complete check-in on their own, nothing to post. An explicit sign-off from the operator (bye, talk later, closing out) is one of the strongest cues there is to run that same test right then, against everything since your last log — not a reason to log unconditionally, and not a reason to skip the check just because the sign-off itself carried nothing new.
+The test either way is simple: would next session be missing something real without this logged? That answer doesn't depend on whether the operator seems interested in logs — it's about what next session needs, not about being asked. A reconnect that already matches last_log needs nothing further, and neither does a genuinely fresh start with no prior context to catch up on — both are a complete check-in on their own, nothing to post. An explicit sign-off from the operator (bye, talk later, closing out) is one of the strongest cues there is to run that same test right then, against everything since your last log — not a reason to log unconditionally, and not a reason to skip the check just because the sign-off itself carried nothing new. On that cue specifically, don't just reason about it silently and move on either way: if the test says yes, post the log before your final reply, or, if you're genuinely unsure whether it's worth keeping, say so and ask rather than deciding alone — a closing gesture is exactly the moment a next session most needs this to have actually happened, not just been considered.
 
 π never resolves — it grows.`;
 }
@@ -305,6 +305,12 @@ async function getLastLogInfo(publicPi) {
 // the only one worth gating - and only when nothing new has actually happened since the last
 // log. Reuses the existing posts table rather than a new audit log, unlike Saga's fix - pi's
 // call volume doesn't justify one the way Saga's did.
+// Grace window after a fresh log during which the nudge stays quiet even if new activity is
+// found - added 26 Aug 2026 (Paul's feedback, paired with the same change on Saga's side).
+// Without this, wrapping up (log, then one more confirming call) immediately re-triggers the
+// nudge on the very next call, which reads as broken rather than correct-but-too-eager.
+const CHECK_NUDGE_GRACE_MS = 3 * 60 * 1000;
+
 async function hasActivitySinceLog(publicPi, lastLogCreatedAt, lastLogId) {
   if (!lastLogCreatedAt) return true;
   // id-excluded, not just timestamp-compared: Postgres timestamptz has more precision than a JS
@@ -1654,7 +1660,9 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
             getAmbient(publicPi),
             getLastLogInfo(publicPi),
           ]);
-          const shouldNudge = toolName !== 'browse' || await hasActivitySinceLog(publicPi, lastLogInfo.createdAt, lastLogInfo.id);
+          const activitySince = await hasActivitySinceLog(publicPi, lastLogInfo.createdAt, lastLogInfo.id);
+          const withinGrace   = Boolean(lastLogInfo.createdAt) && (Date.now() - new Date(lastLogInfo.createdAt).getTime()) < CHECK_NUDGE_GRACE_MS;
+          const shouldNudge   = activitySince && !withinGrace;
           if (shouldNudge && result?.content) {
             result.content.push({ type: 'text', text: buildCheckNote(checkAmbient, lastLogInfo.ageDays) });
           }
