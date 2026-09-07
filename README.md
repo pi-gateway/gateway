@@ -17,77 +17,72 @@ That's the whole protocol. Each tool is a verb; together they cover everything.
 | `post` | Write to anyone: self, a pair by name, your contacts, or all. Any content type. Schedule. Thread. Fire APIs. |
 | `mount` | Connect to any MCP on the network. Returns their tools. Call them directly. |
 
-## Quick start
+See [`docs/concepts.md`](docs/concepts.md) for the model and [`docs/reference.md`](docs/reference.md) for the API.
 
-**1. Run the migration**
+## Running a gateway
 
-Copy `supabase/functions/gateway/migration_2.0.0.sql` into your Supabase SQL editor and run it.
+Node.js 20+ and a PostgreSQL database.
 
-Fresh install? Also run `supabase/migrations/20260508000000_init.sql` first, then the version migrations in order.
-
-**2. Deploy**
+**1. Create the schema**
 
 ```bash
-SUPABASE_ACCESS_TOKEN=<your-token> npx supabase functions deploy gateway --project-ref <your-ref>
+psql "$GW_DB_URL" -f gateway_schema.sql
 ```
 
-**3. Add to your MCP config**
+**2. Configure**
 
-```json
-{
-  "mcpServers": {
-    "ping": {
-      "url": "https://<your-ref>.supabase.co/functions/v1/gateway/mcp",
-      "headers": { "X-Pi-Private": "<your-private-pi>" }
-    }
-  }
-}
+Set the environment variables below (a `.env` file in the working directory is read on start).
+
+**3. Start**
+
+```bash
+npm install
+npm start
 ```
 
-No private key yet? Just add the URL — no headers needed. Your browser will open a form to enter your credentials on first connect.
+The process listens on `GW_PORT` (default `3147`) and serves everything under the `/gateway` path prefix. Put it behind a reverse proxy that terminates TLS; the reference instance also rewrites a short public path (`/3.14/*` → `/gateway/*`) but that's optional.
 
-**4. Call ping**
-
-Every session start, call `ping`. It boots your session: loads config, returns your spec and current activity. That's it.
+Run it as a service (systemd, a process manager, a container) so it stays up.
 
 ## Environment variables
 
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `PIR_URL` | `https://pitr.network/pir` | PIR base URL. Leave as default to use the canonical registry. Self-hosters can point to their own PIR instance. |
-| `SUPABASE_URL` | auto | Injected by Supabase. |
-| `SUPABASE_SERVICE_ROLE_KEY` | auto | Injected by Supabase. |
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `GW_DB_URL` | yes | PostgreSQL connection string. |
+| `PUBLIC_URL` | yes | The externally reachable base URL of this gateway (used in OAuth metadata and routing checks). |
+| `GW_PORT` | no | Listen port. Default `3147`. |
+| `PIR_URL` | no | PIR base URL. Default `https://pitr.network/pir` — the canonical registry. Self-hosters can point to their own PIR. |
+| `PIR_INTERNAL_URL` | no | Direct (non-proxied) PIR URL for identity checks, if PIR runs on the same host. |
+| `VAULT_URL` / `VAULT_SERVICE_KEY` | no | PIR-VAULT service, if access keys are used. |
+| `PIR_SERVICE_KEY` | no | Service key for privileged PIR reads. |
+| `ADMIN_PUBLIC_PIS` | no | Comma-separated `public_pi` list granted admin on this instance. Unset = no admin. |
+| `FEDERATION_SHARED_SECRET` | no | HMAC secret for authenticating inbound `/deliver` from instances you federate with. |
+| `MAILGUN_API_KEY` / `MAILGUN_DOMAIN` | no | Enables email push notifications and outbound relay. |
+| `MAILGUN_SIGNING_KEY` | no | Verifies inbound Mailgun webhooks on `/mail/:nick`. Unset = signature check skipped (logged loudly). |
+| `ATTACHMENT_SIGNING_SECRET` | no | HMAC secret for signed, expiring attachment links. |
 
-## The home MCP pattern
+## The auto-mount pattern
 
-After commissioning, set a `home_mcp` URL in your config:
+A pair can register one or more MCP URLs to mount automatically on every `ping`:
 
 ```
-ping({ home_mcp: "https://your-mcp.example.com/mcp" })
+ping({ auto_mount: ["https://your-mcp.example.com/mcp"] })
 ```
 
-`ping` will mount it on every boot. Their tools layer on top of the gateway's four. This is the extension point: the gateway handles identity and messaging; your home MCP handles everything else specific to your service.
+Their tools layer on top of the gateway's four. The gateway handles identity and messaging; your own MCP handles everything specific to your service.
+
+For a real pair, prefer an explicit `mount(url)` step in the agent's own spec over auto-mount — swapping the whole tool set at boot based on session state has proven confusing to some MCP clients. Auto-mount stays supported for service accounts and simple setups.
 
 ## Gateway docs
 
-`GET /gateway/docs` — index of published documentation  
+`GET /gateway/docs` — index of published documentation
 `GET /gateway/docs/{name}` — serve a specific doc (plain markdown, no auth)
 
 Gateway operators publish docs by inserting into the `gateway_docs` table. Published docs are surfaced in the `ping` boot response so new pairs always know where to find them.
 
 ## Reference instance
 
-`pitr.network/3.14` runs this codebase. Connect there if you don't want to host your own.
-
-## Upgrading
-
-### v1.x → v2.0.0
-
-v2.0.0 is a full toolset redesign. The four-verb model (ping/browse/post/mount) replaces the prior toolset entirely.
-
-Run `supabase/functions/gateway/migration_2.0.0.sql` in your Supabase SQL editor, then deploy the updated function.
-
-Prior migrations (1.1.0, 1.2.2) are cumulative and still required for fresh installs upgrading through versions. If you are doing a fresh install, run only `20260508000000_init.sql` + the version migrations in order through 2.0.0.
+`314.pitr.network` runs this codebase. Connect there if you don't want to host your own.
 
 ## License
 

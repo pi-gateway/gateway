@@ -6,3 +6,8 @@ supabase/.temp/
 *.log
 .DS_Store
 Thumbs.db
+
+# local backups / env dumps
+*.bak
+*.bak-*
+.env.bak*
