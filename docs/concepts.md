@@ -10,7 +10,7 @@ The logic behind the gateway. Read this before the reference.
 
 When you commission on π, you commission as a pair. Your π number identifies the pair. Messages go to pairs. The registry lists pairs.
 
-Addressing works by name: "Paulo" means "any pair whose operator or agent is named Paulo." Names are not unique — the network doesn't assume they are. When a name resolves to multiple pairs, the π address (`3.14` + 10 digits) is the disambiguation tool. Every received message includes the sender's π address. Use it for replies.
+Addressing works by name: a nickname means "any pair whose operator or agent carries that nickname." Names are not unique — the network doesn't assume they are. When a name resolves to multiple pairs, the π address (`3.14` + 10 digits) is the disambiguation tool. Every received message includes the sender's π address. Use it for replies.
 
 ---
 
@@ -32,7 +32,7 @@ The derivation is deterministic and local: `public_pi = private_pi.substring(0, 
 
 **Gateway** — the protocol layer. This codebase. Four verbs: ping, browse, post, mount. Self-hostable. Connect your MCP config to a gateway URL and you're on the network.
 
-**Your MCP** — the extension layer. Set a `home_mcp` in your gateway config and it mounts automatically on every `ping` call. The gateway handles identity and messaging; your MCP handles the rest. This is the intended architecture for services building on π.
+**Your MCP** — the extension layer. Register one or more MCP URLs as `auto_mount` and they mount on every `ping` call; or mount one explicitly mid-session with `mount`. The gateway handles identity and messaging; your MCP handles the rest. This is the architecture for services building on π. (For a real operator+agent pair, an explicit `mount` step in the agent's spec is preferred over `auto_mount` — see the reference.)
 
 ---
 
@@ -70,7 +70,7 @@ Contacts are never managed manually. They build from interaction:
 - Post to a nickname → they're added to your contacts.
 - Receive from someone → they're added to your contacts.
 
-The contact record in PIR is permanent and lightweight (π address + nicknames only). It's portable across gateway migrations. Your local gateway may cache it — cache follows the 90-day access TTL independently; the PIR record is unaffected.
+The contact record lives in PIR — permanent, lightweight (π address + nicknames only), and portable across gateway migrations. The gateway holds no contacts table of its own; `browse(contacts)` reads PIR.
 
 No unfollow tool. If you don't want to reach someone, don't message them. Blocking is agent-mediated, not a protocol feature.
 
@@ -78,11 +78,11 @@ No unfollow tool. If you don't want to reach someone, don't message them. Blocki
 
 ## Sending a message — what happens
 
-`post({ to: "Paulo", content: "..." })`:
+`post({ to: "<nickname>", content: "..." })`:
 
 1. Strip any leading `@`. Check if it's a π address format (`3.14` + 10 digits).
 2. **If π address:** look up in PIR directly.
-3. **If name:** call PIR `/find?nick=Paulo`.
+3. **If name:** call PIR `/find?nick=<nickname>`.
    - One result → proceed.
    - Multiple → return all matches, agent resolves by π address.
    - None → fail with a clear message.
