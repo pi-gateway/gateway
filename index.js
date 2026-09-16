@@ -21,7 +21,7 @@ const upload = multer({
 
 const PORT             = Number(process.env.GW_PORT) || 3147;
 const PREFIX           = '/gateway';
-const GATEWAY_VERSION  = '3.7.1';
+const GATEWAY_VERSION  = '3.8.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 // PIR is same-box (127.0.0.1:3146) but pirValidate() previously went out through the
@@ -2137,6 +2137,22 @@ function verifyMailgunSignature(form) {
   return true;
 }
 
+// A non-Mailgun sender for this same route (e.g. a Cloudflare Email Worker parsing mail for a
+// domain that isn't on Mailgun at all - paul@machsyn.com, see pi/email-gateway/) has no Mailgun
+// webhook signature to verify. Rather than weaken verifyMailgunSignature's own check or lean on
+// its "no signing key configured" fallback (meant for local/dev, not a permanent bypass), this is
+// a second, independent, equally-real auth path: a shared secret set by whoever deploys that
+// sender, compared the same constant-time way. Either one passing is enough - this never loosens
+// the existing Mailgun path for edd@endandit.nl.
+function verifyWorkerSecret(req) {
+  const configured = process.env.EMAIL_WORKER_SECRET;
+  const provided = req.headers['x-worker-secret'];
+  if (!configured || !provided) return false;
+  const expected = Buffer.from(configured);
+  const actual = Buffer.from(String(provided));
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
 // Basic per-IP rate limit, in-memory (single Node process, resets on restart -
 // sufficient given this is a hardening measure, not the primary auth control).
 const mailRateLimit = new Map();
@@ -2183,7 +2199,9 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   const nick   = req.params.nick;
   const form   = req.body ?? {};
 
-  if (!verifyMailgunSignature(form)) return res.status(401).json({ error: 'Invalid signature' });
+  if (!verifyMailgunSignature(form) && !verifyWorkerSecret(req)) {
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
 
   const sender  = form.sender ?? '';
   const from    = form.from   ?? sender;
