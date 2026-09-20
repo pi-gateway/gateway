@@ -215,7 +215,10 @@ ping
   Call ping with no args to see current config.
 
 browse
-  Always returns: activity brief (unread/mentions) + your public π address.
+  Always returns: activity brief (unread/logs/mentions) + your public π address. "logs" counts your
+  own self-posts (e.g. log_* entries) separately from "unread" - they're not incoming messages, so
+  they never inflate that count or show up in the message list itself (start_with_last_log already
+  surfaces the latest one via last_log).
   Targets:
     activity  unread messages + scheduled posts now due + posts newly shared with you (default)
     contacts  your network. query param searches by nickname.
@@ -274,8 +277,15 @@ async function getAmbient(publicPi) {
     pool.query(`SELECT 1 FROM post_shares WHERE shared_with_public_pi = $1 AND accessed_at IS NULL`, [publicPi]),
     pool.query(`SELECT 1 FROM remote_shares WHERE shared_with_public_pi = $1 AND accessed_at IS NULL`, [publicPi]),
   ]);
+  // Self-posts (to_scope 'self' - typically the pair's own log_* entries, see fetchUnreadInbox)
+  // are the pair talking to itself, not an incoming message - counted separately as `logs` rather
+  // than folded into `unread` (Paul/Pitr, 20 Sep 2026: a fresh self-post shouldn't read as "N new
+  // messages" the same way a real message from someone else does; start_with_last_log already
+  // surfaces the latest log's actual content via last_log, so there's nothing more for a self-post
+  // to say in the unread list once distinguished this way).
   return {
-    unread:   rows.filter(p => p.to_scope === 'nickname' || p.to_scope === 'self').length + sharedRows.length + remoteRows.length,
+    unread:   rows.filter(p => p.to_scope === 'nickname').length + sharedRows.length + remoteRows.length,
+    logs:     rows.filter(p => p.to_scope === 'self').length,
     mentions: 0,
   };
 }
@@ -776,10 +786,13 @@ async function toolSet(piPrivate, args, accessKey) {
   const ambient = behaviors.auto_check_activity ? await getAmbient(publicPi) : null;
 
   // Inline inbox fetch — same source of truth as browse(activity), including local and
-  // cross-instance shares (see fetchUnreadInbox).
+  // cross-instance shares (see fetchUnreadInbox). Gated on ambient.logs too, not just
+  // ambient.unread, so a session with nothing but a pending self-post still runs this far enough
+  // to mark it read (fetchUnreadInbox marks everything it touches as accessed) - it's just
+  // filtered back out below rather than surfaced as a message.
   let inboxMessages = null;
-  if (behaviors.auto_check_activity && ambient && ambient.unread > 0) {
-    const inboxPosts = await fetchUnreadInbox(publicPi, 50);
+  if (behaviors.auto_check_activity && ambient && (ambient.unread > 0 || ambient.logs > 0)) {
+    const inboxPosts = (await fetchUnreadInbox(publicPi, 50)).filter(p => p.to_scope !== 'self');
 
     const senderPis = [...new Set(inboxPosts.map(p => p.from_public_pi).filter(Boolean))];
     const nickMap = new Map();
@@ -872,7 +885,10 @@ async function toolBrowse(piPrivate, publicPi, args) {
   const base    = { target, ambient, public_pi: publicPi };
 
   if (target === 'activity') {
-    const posts = await fetchUnreadInbox(publicPi, limit);
+    // Same self-post exclusion as ping's inline inbox above - fetchUnreadInbox still marks them
+    // accessed (so a pending self-post doesn't sit inflating ambient.logs forever), it's just not
+    // surfaced as a message here.
+    const posts = (await fetchUnreadInbox(publicPi, limit)).filter(p => p.to_scope !== 'self');
 
     const senderPis = [...new Set(posts.map(p => p.from_public_pi).filter(Boolean))];
     const nickMap = new Map();
