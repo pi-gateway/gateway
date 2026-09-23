@@ -944,6 +944,44 @@ async function toolBrowse(piPrivate, publicPi, args) {
   }
 
   if (target === 'history') {
+    // Pitr feature request, 23 Sep 2026: a plain browse(history) call could still overrun the
+    // tool's own response-size cap (56k+ chars) at the shared default of 50, and there was no way
+    // to ask for "just the mail" or "just recent" without guessing a smaller `limit`. Fixes below
+    // are scoped to this target only - 'activity'/'servers' keep the original default.
+    const mailOnly = args.mail_only === true;
+    const match = typeof args.match === 'string' && args.match.trim() ? args.match.trim() : null;
+    // A smaller default here (was the shared 50) makes the common "what's my latest" call work
+    // without trial and error - Pitr's own working value was {limit: 15}; an explicit `limit` still
+    // overrides this.
+    const historyLimit = args.limit || 20;
+
+    const conditions = ['(p.from_public_pi = $1 OR p.to_public_pi = $1 OR p.id IN (SELECT post_id FROM post_shares WHERE shared_with_public_pi = $1))'];
+    const params = [publicPi];
+    if (mailOnly) {
+      // Inbound email is stored with from_public_pi = '' (see the Mailgun inbound handler below) -
+      // never null, so this exact-match is safe and matches the shape Pitr observed live.
+      conditions.push(`p.from_public_pi = ''`);
+    }
+    if (match) {
+      params.push(`%${match}%`);
+      conditions.push(`p.content ILIKE $${params.length}`);
+      // Subject lives as the content's own first bold line (see the inbound-mail handler), so this
+      // one substring match covers a subject search too, not just body text.
+    }
+    params.push(historyLimit);
+
+    // Remote shares are pointers only (no content stored locally - see the merge below) and are
+    // never mail, so both filters are meaningless against them; skip the query rather than fetch
+    // rows that would just get dropped.
+    const remoteQuery = (mailOnly || match)
+      ? Promise.resolve({ rows: [] })
+      : pool.query(`
+          SELECT post_id, origin_gateway_mcp, from_public_pi, name, content_type, shared_at, accessed_at
+          FROM remote_shares
+          WHERE shared_with_public_pi = $1
+          ORDER BY shared_at DESC LIMIT $2
+        `, [publicPi, historyLimit]);
+
     const [{ rows: posts }, { rows: remotePointers }] = await Promise.all([
       pool.query(`
         SELECT p.id, p.from_public_pi, p.to_scope, p.to_public_pi, p.content, p.content_type, p.name,
@@ -951,17 +989,11 @@ async function toolBrowse(piPrivate, publicPi, args) {
                rr.target_post_id AS reply_to_remote_post_id, rr.target_gateway_mcp AS reply_to_remote_origin
         FROM posts p
         LEFT JOIN remote_reply_refs rr ON rr.post_id = p.id
-        WHERE p.from_public_pi = $1 OR p.to_public_pi = $1
-           OR p.id IN (SELECT post_id FROM post_shares WHERE shared_with_public_pi = $1)
+        WHERE ${conditions.join(' AND ')}
         ORDER BY p.created_at DESC
-        LIMIT $2
-      `, [publicPi, limit]),
-      pool.query(`
-        SELECT post_id, origin_gateway_mcp, from_public_pi, name, content_type, shared_at, accessed_at
-        FROM remote_shares
-        WHERE shared_with_public_pi = $1
-        ORDER BY shared_at DESC LIMIT $2
-      `, [publicPi, limit]),
+        LIMIT $${params.length}
+      `, params),
+      remoteQuery,
     ]);
 
     const postsMapped = posts.map(({ reply_to_remote_post_id, reply_to_remote_origin, ...p }) => ({
@@ -985,7 +1017,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
 
     const merged = [...postsMapped, ...remoteRows]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-      .slice(0, limit);
+      .slice(0, historyLimit);
     return ok({ ...base, posts: merged, count: merged.length });
   }
 
@@ -1541,10 +1573,12 @@ const BASE_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        target: { type: 'string', description: 'activity (default) | contacts | servers | history | files' },
-        query:  { type: 'string', description: 'contacts: search by nickname. servers: search by name.' },
-        limit:  { type: 'number', description: 'Max results (default 50).' },
-        name:   { type: 'string', description: 'files: read a specific file by name.' },
+        target:    { type: 'string', description: 'activity (default) | contacts | servers | history | files' },
+        query:     { type: 'string', description: 'contacts: search by nickname. servers: search by name.' },
+        limit:     { type: 'number', description: 'Max results (default 50, history default 20 — a smaller default so a plain recent-history call fits comfortably without guessing).' },
+        name:      { type: 'string', description: 'files: read a specific file by name.' },
+        mail_only: { type: 'boolean', description: 'history: only inbound email (subject is the content\'s first bold line, so it\'s covered by match too).' },
+        match:     { type: 'string', description: 'history: case-insensitive substring match against content (covers subject and body).' },
       },
     },
   },
