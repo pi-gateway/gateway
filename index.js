@@ -2184,6 +2184,20 @@ function checkMailRateLimit(ip) {
   return true;
 }
 
+// Mailgun's `Date` field is the sender's raw header line, almost always UTC/GMT (senders on
+// Hetzner boxes format with toUTCString() or similar) - shown verbatim it reads ~2h behind
+// Netherlands wall-clock time in CEST, making a mail that just arrived look already old. Re-render
+// in Europe/Amsterdam with the zone spelled out so it can't be misread as already-elapsed.
+function formatMailDate(raw) {
+  if (!raw) return raw;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const formatted = d.toLocaleString('en-GB', {
+    timeZone: 'Europe/Amsterdam', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+  return `${formatted} (Europe/Amsterdam)`;
+}
+
 // Render an HTML email body to readable text WITHOUT losing link targets — Mailgun's
 // stripped-text/body-plain flattens <a href> to its anchor text only, which can lose e.g. an
 // account-activation URL. Anchors become "text ( url )"; block tags become
@@ -2223,7 +2237,7 @@ app.post(`${PREFIX}/mail/:nick`, upload.any(), async (req, res) => {
   const from    = form.from   ?? sender;
   const subject = form.subject ?? '';
   const replyTo = form['Reply-To'] ?? form['reply-to'] ?? '';
-  const date    = form.Date ?? form.date ?? '';
+  const date    = formatMailDate(form.Date ?? form.date ?? '');
 
   // Deliver the mail IN FULL — nothing dropped or filtered here; triage is the receiving
   // agent's job. Prefer an HTML render that keeps link URLs; fall back to Mailgun's flattened
