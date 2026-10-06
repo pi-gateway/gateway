@@ -949,7 +949,16 @@ async function toolBrowse(piPrivate, publicPi, args) {
     // to ask for "just the mail" or "just recent" without guessing a smaller `limit`. Fixes below
     // are scoped to this target only - 'activity'/'servers' keep the original default.
     const mailOnly = args.mail_only === true;
-    const match = typeof args.match === 'string' && args.match.trim() ? args.match.trim() : null;
+    // `query` is accepted as the same filter: it is the name browse's other targets use, and Pitr
+    // (Oct 2026) passed it here and got silently unfiltered results.
+    const matchArg = args.match ?? args.query;
+    const match = typeof matchArg === 'string' && matchArg.trim() ? matchArg.trim() : null;
+    // Paging + date range (Pitr flag, 6 Oct 2026: an old sent mail scrolled out of the recent window
+    // with no way to reach it). offset pages past the first window, since/until bound by date.
+    const offset = Math.max(0, parseInt(args.offset, 10) || 0);
+    const since  = args.since ? new Date(args.since) : null;
+    const until  = args.until ? new Date(args.until) : null;
+    if ((since && isNaN(since)) || (until && isNaN(until))) return fail('since/until must be ISO dates, e.g. 2026-09-01.');
     // A smaller default here (was the shared 50) makes the common "what's my latest" call work
     // without trial and error - Pitr's own working value was {limit: 15}; an explicit `limit` still
     // overrides this.
@@ -968,7 +977,9 @@ async function toolBrowse(piPrivate, publicPi, args) {
       // Subject lives as the content's own first bold line (see the inbound-mail handler), so this
       // one substring match covers a subject search too, not just body text.
     }
-    params.push(historyLimit);
+    if (since) { params.push(since); conditions.push(`p.created_at >= $${params.length}`); }
+    if (until) { params.push(until); conditions.push(`p.created_at < $${params.length}`); }
+    params.push(historyLimit + offset);
 
     // Remote shares are pointers only (no content stored locally - see the merge below) and are
     // never mail, so both filters are meaningless against them; skip the query rather than fetch
@@ -979,8 +990,10 @@ async function toolBrowse(piPrivate, publicPi, args) {
           SELECT post_id, origin_gateway_mcp, from_public_pi, name, content_type, shared_at, accessed_at
           FROM remote_shares
           WHERE shared_with_public_pi = $1
+            AND ($3::timestamptz IS NULL OR shared_at >= $3)
+            AND ($4::timestamptz IS NULL OR shared_at < $4)
           ORDER BY shared_at DESC LIMIT $2
-        `, [publicPi, historyLimit]);
+        `, [publicPi, historyLimit + offset, since, until]);
 
     const [{ rows: posts }, { rows: remotePointers }] = await Promise.all([
       pool.query(`
@@ -1017,8 +1030,8 @@ async function toolBrowse(piPrivate, publicPi, args) {
 
     const merged = [...postsMapped, ...remoteRows]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-      .slice(0, historyLimit);
-    return ok({ ...base, posts: merged, count: merged.length });
+      .slice(offset, offset + historyLimit);
+    return ok({ ...base, posts: merged, count: merged.length, offset, ...(merged.length === historyLimit ? { next_offset: offset + historyLimit } : {}) });
   }
 
   if (target === 'files') {
@@ -1578,7 +1591,10 @@ const BASE_TOOLS = [
         limit:     { type: 'number', description: 'Max results (default 50, history default 20 — a smaller default so a plain recent-history call fits comfortably without guessing).' },
         name:      { type: 'string', description: 'files: read a specific file by name.' },
         mail_only: { type: 'boolean', description: 'history: only inbound email (subject is the content\'s first bold line, so it\'s covered by match too).' },
-        match:     { type: 'string', description: 'history: case-insensitive substring match against content (covers subject and body).' },
+        match:     { type: 'string', description: 'history: case-insensitive substring match against content (covers subject and body). query works too.' },
+        offset:    { type: 'number', description: 'history: skip this many results (paging). Result carries next_offset while more may remain.' },
+        since:     { type: 'string', description: 'history: only items created on/after this ISO date (e.g. 2026-09-01).' },
+        until:     { type: 'string', description: 'history: only items created before this ISO date.' },
       },
     },
   },
