@@ -3347,6 +3347,42 @@ if (COMMUNITY) app.post(ROOT, handleOuter);
 const mintByIp = new Map();
 const mintDay = { day: '', n: 0 };
 const MINT_PER_IP_HOUR = 5;
+const POW_BITS   = Number(process.env.POW_BITS) || 16;       // ~65k hashes on average (about a second)
+const POW_TTL_MS = 10 * 60_000;
+const powUsed    = new Map();                                // token -> expiry (single use)
+
+function powChallenge() {
+  const body = `${Date.now()}.${randomBytes(12).toString('hex')}`;
+  const mac  = createHmac('sha256', TOKEN_ENC_KEY).update('pow:' + body).digest('hex').slice(0, 32);
+  return { token: `${body}.${mac}`, bits: POW_BITS };
+}
+
+function leadingZeroBits(buf) {
+  let n = 0;
+  for (const b of buf) {
+    if (b === 0) { n += 8; continue; }
+    n += Math.clz32(b) - 24;
+    break;
+  }
+  return n;
+}
+
+function powValid(token, nonce) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3 || !/^\d{1,9}$/.test(String(nonce ?? ''))) return false;
+  const [ts, salt, mac] = parts;
+  const expected = createHmac('sha256', TOKEN_ENC_KEY).update(`pow:${ts}.${salt}`).digest('hex').slice(0, 32);
+  const a = Buffer.from(mac), b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+  const age = Date.now() - Number(ts);
+  if (!(age >= 0 && age <= POW_TTL_MS)) return false;
+  const now = Date.now();
+  for (const [t, exp] of powUsed) if (exp < now) powUsed.delete(t);
+  if (powUsed.has(token)) return false;
+  if (leadingZeroBits(createHash('sha256').update(`${token}:${nonce}`).digest()) < POW_BITS) return false;
+  powUsed.set(token, now + POW_TTL_MS);
+  return true;
+}
 const TURNSTILE_SITE_KEY = process.env.TURNSTILE_SITE_KEY || null;   // both set = the human gate is on
 const TURNSTILE_SECRET   = process.env.TURNSTILE_SECRET   || null;
 const MINT_PER_DAY = Number(process.env.MINT_PER_DAY) || 100;
@@ -3366,7 +3402,7 @@ function mintAllowed(ip) {
 if (COMMUNITY) {
   app.get(`${PREFIX}/join`, (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(joinPage(communityLang(), { user: String(req.query.u ?? '').slice(0, 40), agent: String(req.query.a ?? '').slice(0, 40), siteKey: TURNSTILE_SITE_KEY }));
+    res.send(joinPage(communityLang(), { user: String(req.query.u ?? '').slice(0, 40), agent: String(req.query.a ?? '').slice(0, 40), siteKey: TURNSTILE_SITE_KEY, pow: powChallenge() }));
   });
 
   app.post(`${PREFIX}/join`, express.urlencoded({ extended: false }), async (req, res) => {
@@ -3374,13 +3410,15 @@ if (COMMUNITY) {
     const s = strings(lang);
     const page = (error, user, agent) => {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      return res.send(joinPage(lang, { error, user, agent, siteKey: TURNSTILE_SITE_KEY }));
+      return res.send(joinPage(lang, { error, user, agent, siteKey: TURNSTILE_SITE_KEY, pow: powChallenge() }));
     };
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
     const clean = v => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
     const user = clean(req.body?.username), agent = clean(req.body?.agent_name);
     if (clean(req.body?.website)) return page(s.errMint, '', '');           // honeypot
     if (!user || !agent || user.length > 40 || agent.length > 40) return page(s.errNames, user, agent);
+    // Proof of work: a valid, fresh, unused solution is required before anything is minted.
+    if (!powValid(req.body?.pow_token, req.body?.pow_nonce)) return page(s.errPow, user, agent);
     if (TURNSTILE_SECRET && TURNSTILE_SITE_KEY) {
       // Human gate (Cloudflare Turnstile). Fails closed: no token or a failed check mints nothing.
       let human = false;
