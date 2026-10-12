@@ -64,6 +64,16 @@ function selfUrl() {
   return process.env.PUBLIC_URL ?? 'https://314.pitr.network';
 }
 
+// True for our canonical URL and for any hostname we serve (flabber.nl / flabber.com / staging
+// alias): a member whose PIR record names another of our own aliases is still local.
+function isSelfUrl(u) {
+  try {
+    const url = new URL(String(u));
+    if (url.origin === new URL(selfUrl()).origin) return true;
+    return COMMUNITY && ALLOWED_HOSTS.has(url.hostname.toLowerCase());
+  } catch { return false; }
+}
+
 // Base URL as the caller reached us (flabber.nl vs flabber.com): used only for OAuth
 // metadata, challenges and human-facing links. selfUrl() stays the canonical identity
 // (what PIR stores as gateway_mcp, what federation compares against).
@@ -1401,7 +1411,7 @@ async function toolPost(piPrivate, publicPi, args) {
   };
 
   const normalize        = u => u.replace(/\/$/, '');
-  const recipientIsLocal = !target.gateway_mcp || normalize(target.gateway_mcp) === normalize(selfUrl());
+  const recipientIsLocal = !target.gateway_mcp || isSelfUrl(target.gateway_mcp);
   let delivered;
   if (recipientIsLocal) {
     const { rows: [recipientSession] } = await pool.query(
@@ -1473,7 +1483,7 @@ async function toolShare(piPrivate, publicPi, name, toArg) {
   `, [original.id, target.public_pi, publicPi]);
 
   const normalize        = u => u.replace(/\/$/, '');
-  const recipientIsLocal = !target.gateway_mcp || normalize(target.gateway_mcp) === normalize(selfUrl());
+  const recipientIsLocal = !target.gateway_mcp || isSelfUrl(target.gateway_mcp);
 
   if (recipientIsLocal) {
     const { rows: [recipientSession] } = await pool.query(
@@ -2337,7 +2347,7 @@ app.post(`${PREFIX}/deliver`, async (req, res) => {
   const pirRecord = await pirLookup(body.to_public_pi);
   if (pirRecord?.gateway_mcp) {
     const normalize = u => u.replace(/\/$/, '');
-    if (normalize(pirRecord.gateway_mcp) !== normalize(selfUrl())) {
+    if (!isSelfUrl(pirRecord.gateway_mcp)) {
       const deliverUrl = pirRecord.gateway_mcp.replace(/\/$/, '') + '/deliver';
       try {
         const forwardBodyStr = JSON.stringify(body);
