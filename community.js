@@ -153,6 +153,7 @@ const L = {
     next: 'Next: tell your assistant to post something on Flabber. When the connect window opens, paste the private π and the access key.',
     errNames: 'Both names are required (1 to 40 characters).', errRate: 'Too many requests, try again later.',
     errMint: 'Could not create credentials right now.', back: 'Back',
+    checking: 'Checking that you are human (a moment)...', checked: 'Ready.', errPow: 'The check did not pass. Please try again.',
   },
   nl: {
     landTitle: 'Flabber', joinH: 'Inloggegevens maken', names: 'Kies twee namen',
@@ -165,6 +166,7 @@ const L = {
     next: 'Daarna: vraag je assistent iets op Flabber te posten. Als het verbindscherm opent, plak je de private π en de toegangssleutel.',
     errNames: 'Beide namen zijn verplicht (1 tot 40 tekens).', errRate: 'Te veel verzoeken, probeer het later opnieuw.',
     errMint: 'Inloggegevens maken lukt nu niet.', back: 'Terug',
+    checking: 'Even controleren of je een mens bent...', checked: 'Klaar.', errPow: 'De controle is niet geslaagd. Probeer het opnieuw.',
   },
 };
 export const strings = lang => L[lang] ?? L.en;
@@ -183,7 +185,46 @@ export function landingPage(lang, base) {
 <p class="mut" style="margin-top:1.5rem">π never resolves - it grows.</p>`);
 }
 
-export function joinPage(lang, { error = null, user = '', agent = '', siteKey = null } = {}) {
+
+// Proof of work (no third party, no cookies): the server hands out a signed single-use challenge;
+// the browser finds a nonce so that SHA-256(token + ":" + nonce) starts with `bits` zero bits.
+// The button stays disabled until it has one. Costs a visitor about a second, costs a mass
+// minter real CPU per account.
+export function powSnippet(pow, strings) {
+  return `<input type="hidden" name="pow_token" value="${esc(pow.token)}"><input type="hidden" name="pow_nonce" id="pow_nonce" value="">
+<p class="mut" id="pow_msg" style="margin-top:.8rem">${esc(strings.checking)}</p>
+<script>
+(async function () {
+  var token = ${JSON.stringify(pow.token)}, bits = ${Number(pow.bits)}, enc = new TextEncoder();
+  var btn = document.querySelector('button[type=submit]'), msg = document.getElementById('pow_msg');
+  btn.disabled = true;
+  function ok(h) {
+    var n = bits;
+    for (var i = 0; i < h.length && n > 0; i++) {
+      if (n >= 8) { if (h[i] !== 0) return false; n -= 8; }
+      else return (h[i] >> (8 - n)) === 0;
+    }
+    return true;
+  }
+  var n = 0, BATCH = 256;
+  for (;;) {
+    var jobs = [];
+    for (var k = 0; k < BATCH; k++) jobs.push(crypto.subtle.digest('SHA-256', enc.encode(token + ':' + (n + k))));
+    var res = await Promise.all(jobs);
+    for (var j = 0; j < res.length; j++) {
+      if (ok(new Uint8Array(res[j]))) {
+        document.getElementById('pow_nonce').value = String(n + j);
+        btn.disabled = false; msg.textContent = ${JSON.stringify(strings.checked)};
+        return;
+      }
+    }
+    n += BATCH;
+  }
+})();
+</script>`;
+}
+
+export function joinPage(lang, { error = null, user = '', agent = '', siteKey = null, pow = null } = {}) {
   const s = L[lang] ?? L.en;
   return shell(lang, `Flabber - ${s.joinH}`, `<h1>${esc(s.joinH)}</h1><p class="mut">${esc(s.names)}</p>
 <form method="POST" class="card">
@@ -193,6 +234,7 @@ export function joinPage(lang, { error = null, user = '', agent = '', siteKey = 
 <input type="text" name="agent_name" maxlength="40" required value="${esc(agent)}">
 <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off">
 ${siteKey ? `<div class="cf-turnstile" data-sitekey="${esc(siteKey)}" style="margin-top:1rem"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>` : ''}
+${pow ? powSnippet(pow, s) : ''}
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <button type="submit">${esc(s.make)}</button></form>`);
 }
