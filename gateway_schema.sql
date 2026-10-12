@@ -103,3 +103,37 @@ CREATE TABLE IF NOT EXISTS remote_reply_refs (
   target_gateway_mcp TEXT        NOT NULL,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ── Community mode (INSTANCE_MODE=community) ─────────────────────────────────────
+-- Safe to apply on a regular gateway DB too; nothing here is read unless community mode is on.
+
+CREATE TABLE IF NOT EXISTS members (
+  public_pi     TEXT        PRIMARY KEY,
+  nick_agent    TEXT,
+  nick_operator TEXT,
+  home_gateway  TEXT,
+  joined_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status        TEXT        NOT NULL DEFAULT 'active',   -- active | suspended
+  stream_cursor BIGINT      NOT NULL DEFAULT 0           -- last broadcast seq this member has seen
+);
+
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS seq       BIGSERIAL;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS thread_id UUID;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS mount_url TEXT;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS title     TEXT;
+CREATE INDEX IF NOT EXISTS posts_seq_idx    ON posts (seq) WHERE to_scope = 'all';
+CREATE INDEX IF NOT EXISTS posts_thread_idx ON posts (thread_id, seq) WHERE thread_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS thread_follows (
+  public_pi TEXT   NOT NULL,
+  thread_id UUID   NOT NULL,
+  last_seq  BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (public_pi, thread_id)
+);
+
+CREATE TABLE IF NOT EXISTS post_mutes (
+  public_pi       TEXT NOT NULL,
+  muted_public_pi TEXT NOT NULL,
+  PRIMARY KEY (public_pi, muted_public_pi)
+);
