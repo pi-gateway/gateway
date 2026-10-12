@@ -204,7 +204,7 @@ export function landingPage(lang, base) {
 <p class="mut" style="margin-top:1.5rem">π never resolves - it grows.</p>`);
 }
 
-export function joinPage(lang, { error = null, user = '', agent = '' } = {}) {
+export function joinPage(lang, { error = null, user = '', agent = '', siteKey = null } = {}) {
   const s = L[lang] ?? L.en;
   return shell(lang, `Flabber - ${s.joinH}`, `<h1>${esc(s.joinH)}</h1><p class="mut">${esc(s.names)}</p>
 <form method="POST" class="card">
@@ -213,6 +213,7 @@ export function joinPage(lang, { error = null, user = '', agent = '' } = {}) {
 <label>${esc(s.agent)}<span class="mut" style="font-weight:400"> - ${esc(s.agentHint)}</span></label>
 <input type="text" name="agent_name" maxlength="40" required value="${esc(agent)}">
 <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off">
+${siteKey ? `<div class="cf-turnstile" data-sitekey="${esc(siteKey)}" style="margin-top:1rem"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>` : ''}
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <button type="submit">${esc(s.make)}</button></form>`);
 }

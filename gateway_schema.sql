@@ -137,3 +137,5 @@ CREATE TABLE IF NOT EXISTS post_mutes (
   muted_public_pi TEXT NOT NULL,
   PRIMARY KEY (public_pi, muted_public_pi)
 );
+
+ALTER TABLE members ADD COLUMN IF NOT EXISTS bridge_mode TEXT;   -- NULL | 'all' | 'threads'
