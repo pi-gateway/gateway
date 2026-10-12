@@ -10,9 +10,10 @@ import path    from 'path';
 import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'crypto';
 import pg      from 'pg';
 import { safeFetch } from './ssrfGuard.js';
+import { createPassVerifier } from './pi-pass-verify.js';
 import { AsyncLocalStorage } from 'async_hooks';
 import {
-  encSecret, decSecret, loadOrCreateSigningKey, signPass, verifyPass,
+  encSecret, decSecret, loadOrCreateSigningKey, signPass,
   langFor, specFor, anonNoteFor, landingPage, joinPage, credsPage, strings,
 } from './community.js';
 
@@ -34,7 +35,13 @@ const ALLOWED_HOSTS    = new Set((process.env.ALLOWED_HOSTS ?? '').split(',').ma
 const TOKEN_ENC_KEY    = process.env.TOKEN_ENC_KEY;
 const TRUSTED_MOUNT_ORIGINS = new Set((process.env.TRUSTED_MOUNT_ORIGINS ?? '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean));
 const als              = new AsyncLocalStorage();   // per-request { host, identity }
-const signer           = COMMUNITY ? loadOrCreateSigningKey(process.env.PASS_KEY_FILE ?? './.passkey.pem') : null;
+// π Pass: on for community instances; on a regular gateway only when MOUNT_IDENTITY=pass (a
+// phased cutover: consumers that verify passes first, then flip). The signing key is loaded when
+// passes are issued OR when a key file already exists, so the JWKS can be published (and
+// consumers tested) before the flip.
+const PASS_KEY_FILE    = process.env.PASS_KEY_FILE ?? './.passkey.pem';
+const PASS_MODE        = COMMUNITY || process.env.MOUNT_IDENTITY === 'pass';
+const signer           = (PASS_MODE || fs.existsSync(PASS_KEY_FILE)) ? loadOrCreateSigningKey(PASS_KEY_FILE) : null;
 if (COMMUNITY && !/^[0-9a-f]{64}$/i.test(TOKEN_ENC_KEY || '')) { console.error('INSTANCE_MODE=community requires TOKEN_ENC_KEY (64 hex)'); process.exit(1); }
 const GATEWAY_VERSION  = '3.8.0';
 const PROTOCOL_VERSION = '2.0';
@@ -676,7 +683,7 @@ function mountAuthHeaders(targetUrl, piPrivate, accessKey) {
     if (accessKey) h['X-Pi-Access-Key'] = accessKey;
     return h;
   };
-  if (!COMMUNITY) return legacy();
+  if (!PASS_MODE) return legacy();
   let origin;
   try { origin = new URL(targetUrl).origin; } catch { return h; }
   if (TRUSTED_MOUNT_ORIGINS.has(origin) && piPrivate) return legacy();
@@ -820,6 +827,10 @@ async function toolSet(piPrivate, args, accessKey) {
   const validated = await validateWithKey(piPrivate, accessKey);
   if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
   if (!passesLocalKeyPolicy(validated)) return fail('Access key required for this instance.');
+  {
+    const store = als.getStore();
+    if (store) store.identity = { public_pi: validated.public_pi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator, key_verified: validated.access_key_verified === true };
+  }
 
   // Upsert session — core fields; personality/behaviors/auto_mount now live in PIR
   const upsertCols = ['public_pi', 'nick_agent', 'nick_operator', 'last_seen'];
@@ -2077,6 +2088,10 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
     if (!listValidated?.valid || !passesLocalKeyPolicy(listValidated)) {
       return { jsonrpc: '2.0', id, result: { tools: [] } };
     }
+    {
+      const store = als.getStore();
+      if (store) store.identity = { public_pi: listValidated.public_pi, nick_agent: listValidated.nick_agent, nick_operator: listValidated.nick_operator, key_verified: listValidated.access_key_verified === true };
+    }
     let tools = [...BASE_TOOLS];
     {
       const publicPi = listValidated.public_pi;
@@ -2132,6 +2147,8 @@ async function handleJsonRpc(piPrivate, body, accessKey) {
           return { jsonrpc: '2.0', id, result: noIdentity() };
         }
         const publicPi = validated.public_pi;
+        const store = als.getStore();
+        if (store) store.identity = { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator, key_verified: validated.access_key_verified === true };
 
         // gateway_mcp always owns these four verbs — no mount, however many base verbs
         // it exposes, ever takes over dispatch (isFullMount removed entirely).
@@ -2885,9 +2902,11 @@ app.get(`${PREFIX}/.well-known/oauth-protected-resource`, (req, res) => {
   res.json({ resource: base, authorization_servers: [base], bearer_methods_supported: ['header'] });
 });
 
-if (COMMUNITY) {
+if (signer) {
   // Public key(s) other servers use to verify π Passes this instance issues.
-  app.get(`${PREFIX}/.well-known/jwks.json`, (req, res) => res.json({ keys: [signer.jwk] }));
+  app.get(`${PREFIX}/.well-known/jwks.json`, (req, res) => {
+    res.set('Cache-Control', 'public, max-age=300').json({ keys: [signer.jwk] });
+  });
 }
 
 // client_id -> registered redirect_uris (in memory; clients re-register on connect)
@@ -3155,35 +3174,24 @@ app.post(`${PREFIX}/tools`, async (req, res) => {
 
 // ── π Pass verification (inbound) ───────────────────────────────────────────────
 
-const jwksCache = new Map(); // iss -> { keys, at }
-async function getJwk(iss, kid) {
-  let origin;
-  try { origin = new URL(iss).origin; } catch { return null; }
-  const hit = jwksCache.get(origin);
-  if (!hit || Date.now() - hit.at > 10 * 60_000) {
-    try {
-      const r = await safeFetch(`${origin}/.well-known/jwks.json`, { signal: AbortSignal.timeout(5000) });
-      if (!r.ok) return null;
-      jwksCache.set(origin, { keys: (await r.json())?.keys ?? [], at: Date.now() });
-    } catch { return null; }
-  }
-  return (jwksCache.get(origin)?.keys ?? []).find(k => k.kid === kid) ?? null;
-}
+// Key discovery is anchored in PIR: the pass's `sub` -> PIR record -> registered home ->
+// that home's published JWKS (see pi-pass-verify.js). Homes we accept: this instance's own
+// names plus TRUSTED_HOMES (default: the Gateway).
+const passVerifier = createPassVerifier({
+  pirIdUrl: `${PIR_INTERNAL}/id`,
+  trustedHomes: [
+    selfUrl(),
+    ...[...ALLOWED_HOSTS].map(h => `https://${h}`),
+    ...(process.env.TRUSTED_HOMES ?? 'https://pitr.network,https://314.pitr.network').split(',').map(x => x.trim()).filter(Boolean),
+  ],
+});
 
-// A pass counts only if (1) the signature verifies against the issuer's published key, (2) it
-// is addressed to us, and (3) PIR says the issuer is that public π's registered home - only a
-// pair's own home server may vouch for it.
 async function identityFromPass(token) {
-  const claims = await verifyPass(token, { audience: reqBase(), getJwk });
-  if (!claims || !PUBLIC_PI_RE.test(String(claims.sub))) return null;
-  const rec = await pirLookup(claims.sub);
-  if (!rec?.gateway_mcp) return null;
-  let home, iss;
-  try { home = new URL(rec.gateway_mcp).origin; iss = new URL(claims.iss).origin; } catch { return null; }
-  if (home !== iss) return null;
+  const id = await passVerifier.verify(token, reqBase());
+  if (!id) return null;
   return {
-    public_pi: claims.sub, nick_agent: rec.nick_agent ?? null, nick_operator: rec.nick_operator ?? null,
-    key_verified: claims.acr === 'pi:key', gateway_mcp: rec.gateway_mcp, via: 'pass',
+    public_pi: id.public_pi, nick_agent: id.nick_agent, nick_operator: id.nick_operator,
+    key_verified: id.key_verified, gateway_mcp: id.home, via: 'pass',
   };
 }
 
