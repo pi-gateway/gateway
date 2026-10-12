@@ -11,3 +11,5 @@ Thumbs.db
 *.bak
 *.bak-*
 .env.bak*
+
+.passkey.pem
