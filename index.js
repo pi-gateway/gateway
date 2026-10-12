@@ -2313,6 +2313,15 @@ app.use((req, res, next) => {
 });
 
 if (COMMUNITY) {
+  // Brand icons live next to index.js (favicon-32.png, favicon.png 192, apple-touch-icon.png 180).
+  // Served at the bare origin; /favicon.ico answers with the 32px PNG, which browsers accept.
+  for (const [route, file] of [['/favicon.ico', 'favicon-32.png'], ['/favicon-32.png', 'favicon-32.png'],
+                               ['/favicon.png', 'favicon.png'], ['/apple-touch-icon.png', 'apple-touch-icon.png']]) {
+    app.get(`${PREFIX}${route}`, (req, res) => {
+      res.type('image/png').set('Cache-Control', 'public, max-age=86400')
+        .sendFile(path.join(process.cwd(), file), err => { if (err && !res.headersSent) res.status(404).end(); });
+    });
+  }
   // A community instance has no email gateway, public contact form or attachment store.
   for (const p of ['/mail', '/contact', '/attachments']) {
     app.use(`${PREFIX}${p}`, (req, res) => res.status(404).json({ error: 'Not found' }));
