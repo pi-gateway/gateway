@@ -69,7 +69,7 @@ const PASS_KEY_FILE    = process.env.PASS_KEY_FILE ?? './.passkey.pem';
 const PASS_MODE        = COMMUNITY || process.env.MOUNT_IDENTITY === 'pass';
 const signer           = (PASS_MODE || fs.existsSync(PASS_KEY_FILE)) ? loadOrCreateSigningKey(PASS_KEY_FILE) : null;
 if (COMMUNITY && !/^[0-9a-f]{64}$/i.test(TOKEN_ENC_KEY || '')) { console.error('INSTANCE_MODE=community requires TOKEN_ENC_KEY (64 hex)'); process.exit(1); }
-const GATEWAY_VERSION  = '3.8.0';
+const GATEWAY_VERSION  = '3.9.0';
 const PROTOCOL_VERSION = '2.0';
 const PIR              = process.env.PIR_URL ?? 'https://pitr.network/pir';
 // PIR is same-box (127.0.0.1:3146) but pirValidate() previously went out through the
