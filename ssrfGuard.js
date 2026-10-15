@@ -2,11 +2,18 @@
 // point this server's own fetch at an arbitrary URL. Blocks loopback/private/link-local
 // (incl. cloud metadata 169.254.169.254) targets, and resolves DNS itself so the
 // same lookup used to validate is the one used to connect (no rebind TOCTOU gap).
+//
+// IP literals never reach the DNS lookup hook, so they are checked up front: brackets are stripped from
+// IPv6 hosts, every IPv6 form that embeds an IPv4 address (mapped hex and dotted, compatible, NAT64, 6to4)
+// is unwrapped and checked, and redirects are followed by hand so each hop is validated, not only the
+// first URL.
 import { fetch as undiciFetch, Agent } from 'undici';
 import dns from 'node:dns';
 import net from 'node:net';
 
-function isBlockedIpv4(ip) {
+const MAX_REDIRECTS = 4;
+
+export function isBlockedIpv4(ip) {
   const [a, b, c] = ip.split('.').map(Number);
   if (a === 0) return true;                          // 0.0.0.0/8
   if (a === 10) return true;                          // 10.0.0.0/8
@@ -21,19 +28,44 @@ function isBlockedIpv4(ip) {
   return false;
 }
 
-function isBlockedIp(ip) {
-  if (net.isIPv4(ip)) return isBlockedIpv4(ip);
-  if (net.isIPv6(ip)) {
-    const low = ip.toLowerCase();
-    if (low === '::1' || low === '::') return true;
-    if (/^fe[89ab]/.test(low)) return true;            // fe80::/10 link-local
-    if (/^f[cd][0-9a-f]{0,2}:/.test(low)) return true;  // fc00::/7 ULA
-    if (low.startsWith('::ffff:')) {
-      const v4 = low.split(':').pop();
-      if (net.isIPv4(v4)) return isBlockedIpv4(v4);
-    }
-    return false;
+// Eight 16-bit groups from any valid IPv6 text form (handles "::" and a trailing dotted IPv4).
+function expandIpv6(ip) {
+  let s = ip.toLowerCase().split('%')[0];
+  const dotted = s.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const o = dotted[1].split('.').map(Number);
+    s = s.slice(0, -dotted[1].length) + ((o[0] << 8) | o[1]).toString(16) + ':' + ((o[2] << 8) | o[3]).toString(16);
   }
+  const halves = s.split('::');
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length > 1 && halves[1] ? halves[1].split(':') : [];
+  const fill = halves.length > 1 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array(Math.max(fill, 0)).fill('0'), ...tail].map(g => parseInt(g || '0', 16));
+  return groups.length === 8 ? groups : null;
+}
+
+function v4FromGroups(hi, lo) {
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+}
+
+export function isBlockedIp(ipIn) {
+  const ip = String(ipIn).replace(/^\[|\]$/g, '').split('%')[0];
+  if (net.isIPv4(ip)) return isBlockedIpv4(ip);
+  if (!net.isIPv6(ip)) return false;
+  const g = expandIpv6(ip);
+  if (!g) return true;                                              // cannot parse: refuse
+  const allZeroTo = n => g.slice(0, n).every(x => x === 0);
+  if (allZeroTo(7) && (g[7] === 0 || g[7] === 1)) return true;      // :: and ::1
+  if (allZeroTo(5) && g[5] === 0xffff) return isBlockedIpv4(v4FromGroups(g[6], g[7])); // ::ffff:a.b.c.d (mapped)
+  if (allZeroTo(6)) return isBlockedIpv4(v4FromGroups(g[6], g[7])); // ::a.b.c.d (compatible)
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every(x => x === 0)) return isBlockedIpv4(v4FromGroups(g[6], g[7])); // 64:ff9b::/96 NAT64
+  if (g[0] === 0x2002) return isBlockedIpv4(v4FromGroups(g[1], g[2])); // 6to4
+  if (g[0] === 0x2001 && g[1] === 0) return true;                   // Teredo 2001::/32
+  if (g[0] === 0x2001 && g[1] === 0xdb8) return true;               // documentation
+  if ((g[0] & 0xffc0) === 0xfe80) return true;                      // fe80::/10 link-local
+  if ((g[0] & 0xffc0) === 0xfec0) return true;                      // fec0::/10 site-local (deprecated)
+  if ((g[0] & 0xfe00) === 0xfc00) return true;                      // fc00::/7 ULA
+  if ((g[0] & 0xff00) === 0xff00) return true;                      // ff00::/8 multicast
   return false;
 }
 
@@ -55,13 +87,37 @@ function safeLookup(hostname, options, callback) {
 // request made through it, so validation and connection always see the same address.
 const ssrfAgent = new Agent({ connect: { lookup: safeLookup } });
 
-export async function safeFetch(url, opts = {}) {
+export function assertUrlAllowed(url) {
   const u = new URL(url);
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error(`Egress blocked: unsupported protocol ${u.protocol}`);
   }
-  if (net.isIP(u.hostname) && isBlockedIp(u.hostname)) {
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  if (!host || /^localhost$/i.test(host) || /\.localhost$/i.test(host)) {
     throw new Error(`Egress blocked: ${u.hostname} is a restricted address`);
   }
-  return undiciFetch(url, { ...opts, dispatcher: ssrfAgent });
+  // An IP literal never goes through the DNS lookup hook, so it is checked here.
+  if (net.isIP(host) && isBlockedIp(host)) {
+    throw new Error(`Egress blocked: ${u.hostname} is a restricted address`);
+  }
+  return u;
+}
+
+export async function safeFetch(url, opts = {}) {
+  let current = assertUrlAllowed(url).toString();
+  let init = { ...opts, dispatcher: ssrfAgent, redirect: 'manual' };
+  for (let hop = 0; ; hop++) {
+    const res = await undiciFetch(current, init);
+    const loc = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+    if (!loc || opts.redirect === 'manual' || opts.redirect === 'error') return res;
+    if (hop >= MAX_REDIRECTS) throw new Error('Egress blocked: too many redirects');
+    try { await res.body?.cancel(); } catch { /* ignore */ }
+    const next = new URL(loc, current).toString();
+    assertUrlAllowed(next);                                          // every hop is validated
+    const method = (init.method || 'GET').toUpperCase();
+    if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) {
+      init = { ...init, method: 'GET', body: undefined };
+    }
+    current = next;
+  }
 }
