@@ -195,6 +195,8 @@ export function powSnippet(pow, strings) {
 <p class="mut" id="pow_msg" style="margin-top:.8rem">${esc(strings.checking)}</p>
 <script>
 (async function () {
+  // This script sits above the submit button in the form, so wait for the DOM before looking it up.
+  if (document.readyState === 'loading') await new Promise(function (r) { document.addEventListener('DOMContentLoaded', r); });
   var token = ${JSON.stringify(pow.token)}, bits = ${Number(pow.bits)}, enc = new TextEncoder();
   var btn = document.querySelector('button[type=submit]'), msg = document.getElementById('pow_msg');
   btn.disabled = true;
