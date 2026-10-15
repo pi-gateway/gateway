@@ -35,6 +35,32 @@ const ALLOWED_HOSTS    = new Set((process.env.ALLOWED_HOSTS ?? '').split(',').ma
 const TOKEN_ENC_KEY    = process.env.TOKEN_ENC_KEY;
 const TRUSTED_MOUNT_ORIGINS = new Set((process.env.TRUSTED_MOUNT_ORIGINS ?? '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean));
 const als              = new AsyncLocalStorage();   // per-request { host, identity }
+
+// Failed-auth throttle: PIR exempts loopback callers from its per-IP limit, and the gateway reaches PIR over
+// loopback, so identity checks made through an MCP endpoint need their own limit. Failed checks are counted
+// per client IP here (successes never count), in memory.
+const AUTH_FAILS = new Map();
+const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_FAIL_MAX_PER_TARGET = 15;   // failures per client IP per claimed public pi
+const AUTH_FAIL_MAX_PER_IP = 300;      // failures per client IP across all targets (shared connector egress IPs stay well below)
+function authFailCount(key) {
+  const e = AUTH_FAILS.get(key);
+  return e && Date.now() - e.since < AUTH_FAIL_WINDOW_MS ? e.n : 0;
+}
+function authFailBlocked(ip, target) {
+  if (!ip) return false;
+  return authFailCount(ip + '|' + target) >= AUTH_FAIL_MAX_PER_TARGET || authFailCount(ip) >= AUTH_FAIL_MAX_PER_IP;
+}
+function authFailNote(ip, target) {
+  if (!ip) return;
+  const now = Date.now();
+  for (const k of [ip + '|' + target, ip]) {
+    const e = AUTH_FAILS.get(k);
+    if (!e || now - e.since >= AUTH_FAIL_WINDOW_MS) AUTH_FAILS.set(k, { n: 1, since: now });
+    else e.n += 1;
+  }
+  if (AUTH_FAILS.size > 5000) for (const [k, v] of AUTH_FAILS) if (now - v.since >= AUTH_FAIL_WINDOW_MS) AUTH_FAILS.delete(k);
+}
 // π Pass: on for community instances; on a regular gateway only when MOUNT_IDENTITY=pass (a
 // phased cutover: consumers that verify passes first, then flip). The signing key is loaded when
 // passes are issued OR when a key file already exists, so the JWKS can be published (and
@@ -156,10 +182,14 @@ async function vaultVerify(publicPi, accessKey) {
 }
 
 async function validateWithKey(piPrivate, accessKey) {
+  const ctxIp = als.getStore()?.ip;
+  const ctxTarget = String(piPrivate || '').slice(0, 14);
+  if (authFailBlocked(ctxIp, ctxTarget)) return { valid: false, error: 'Too many failed attempts. Try again later.' };
   const validated = await pirValidate(piPrivate);
-  if (!validated?.valid) return validated;
+  if (!validated?.valid) { authFailNote(ctxIp, ctxTarget); return validated; }
   const vault = await vaultVerify(validated.public_pi, accessKey);
   if (vault?.registered && !vault?.verified) {
+    authFailNote(ctxIp, ctxTarget);
     return { valid: false, error: vault.error || 'Invalid access_key' };
   }
   return { ...validated, access_key_verified: vault?.registered ? vault.verified === true : false };
@@ -825,7 +855,7 @@ async function toolSet(piPrivate, args, accessKey) {
   if (Object.keys(pirUpdates).length) await pirUpdate(piPrivate, pirUpdates);
 
   const validated = await validateWithKey(piPrivate, accessKey);
-  if (!validated?.valid) return fail('Identity not found in PIR. Your private key may be invalid.');
+  if (!validated?.valid) return fail(validated?.error === 'Too many failed attempts. Try again later.' ? validated.error : 'Identity not found in PIR. Your private key may be invalid.');
   if (!passesLocalKeyPolicy(validated)) return fail('Access key required for this instance.');
   {
     const store = als.getStore();
@@ -2303,6 +2333,7 @@ function innerHeaders(req) {
   const fh = req.headers['x-forwarded-host'] || req.headers.host;
   if (fh) headers['X-Forwarded-Host'] = String(fh).split(',')[0].trim();
   if (req.headers['x-pi-pass']) headers['X-Pi-Pass'] = req.headers['x-pi-pass'];
+  if (req.headers['x-forwarded-for']) headers['X-Forwarded-For'] = String(req.headers['x-forwarded-for']);   // client IP for the auth-failure throttle
   if (req.headers['x-pi-private'])    headers['X-Pi-Private']    = req.headers['x-pi-private'];
   if (req.headers['x-pi-access-key']) headers['X-Pi-Access-Key'] = req.headers['x-pi-access-key'];
   if (req.headers['authorization'])   headers['Authorization']   = req.headers['authorization'];
@@ -2395,7 +2426,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   const raw  = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().split(':')[0].toLowerCase();
   const host = ALLOWED_HOSTS.size ? (ALLOWED_HOSTS.has(raw) ? raw : null) : raw;
-  als.run({ host, identity: null }, next);
+  als.run({ host, identity: null, ip: (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress }, next);
 });
 
 if (COMMUNITY) {
@@ -3055,8 +3086,23 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
 
 // Community: only redirect to a URI the client registered (an open redirect here would hand
 // an authorization code to whoever crafted the link). The page also shows the target host.
+// On a regular gateway the authorize page only redirects to known MCP client hosts (and loopback for local
+// tools). Add a host here to support a new client.
+const REDIRECT_HOSTS_EXACT = new Set(['claude.ai', 'claude.com', 'chatgpt.com', 'chat.openai.com', 'platform.openai.com', 'cursor.com', 'vscode.dev', 'insiders.vscode.dev']);
+const REDIRECT_HOST_SUFFIXES = ['.claude.ai', '.claude.com', '.openai.com', '.cloud.google.com', '.googleusercontent.com', '.cursor.com'];
+function redirectHostAllowed(uri) {
+  let u;
+  try { u = new URL(String(uri)); } catch { return false; }
+  if (u.username || u.password) return false;
+  const host = u.hostname.toLowerCase();
+  if (['cursor:', 'vscode:', 'vscode-insiders:'].includes(u.protocol)) return true;   // desktop editors' own URL schemes
+  if (u.protocol === 'http:') return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+  if (u.protocol !== 'https:') return false;
+  return REDIRECT_HOSTS_EXACT.has(host) || REDIRECT_HOST_SUFFIXES.some(s => host.endsWith(s));
+}
+
 function redirectAllowed(client_id, redirect_uri) {
-  if (!COMMUNITY) return true;
+  if (!COMMUNITY) return redirectHostAllowed(redirect_uri);
   const uris = registeredClients.get(String(client_id ?? ''));
   return Array.isArray(uris) && uris.includes(String(redirect_uri));
 }
@@ -3211,7 +3257,6 @@ app.post(`${PREFIX}/tools`, async (req, res) => {
   // Diagnostic: logs which auth path (header / bearer-matched / bearer-no-match /
   // no-credential) a request took, without logging the credential itself. Useful when a
   // bearer token round-trips the OAuth flow but still resolves to no_identity.
-  console.log(`[auth-diag] ${req.method} /tools auth=${authDiag} piPrivateOk=${!!(piPrivate && PRIVATE_PI_RE.test(piPrivate))}`);
   const body = req.body;
   if (!body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   if (body.method?.startsWith('notifications/')) return res.status(202).end();
