@@ -3090,6 +3090,8 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
 // tools). Add a host here to support a new client.
 const REDIRECT_HOSTS_EXACT = new Set(['claude.ai', 'claude.com', 'chatgpt.com', 'chat.openai.com', 'platform.openai.com', 'cursor.com', 'vscode.dev', 'insiders.vscode.dev']);
 const REDIRECT_HOST_SUFFIXES = ['.claude.ai', '.claude.com', '.openai.com', '.cloud.google.com', '.googleusercontent.com', '.cursor.com'];
+// Own clients (e.g. a hosted web app) go in REDIRECT_HOSTS_EXTRA, comma separated exact hostnames, instead of code edits.
+for (const h of String(process.env.REDIRECT_HOSTS_EXTRA || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean)) REDIRECT_HOSTS_EXACT.add(h);
 function redirectHostAllowed(uri) {
   let u;
   try { u = new URL(String(uri)); } catch { return false; }
