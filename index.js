@@ -285,7 +285,8 @@ ping
   Commission a new pair or boot an existing one. Config: personality, behaviors, auto_mount, gateway_mcp.
   Behaviors (all on by default): auto_log · session_end_log · start_with_last_log · auto_check_activity
   Notify (off by default, needs your own): ping({notify:{slack, email}}) — Slack incoming-webhook URL / email address, from your own workspace. One call, takes effect on the next message.
-  Call ping with no args to see current config.
+  Call ping with no args to see current config. A boot also returns your unread inbox and marks it read;
+  ping({peek:true}) boots without marking anything read (for clients that only want this documentation).
 
 browse
   Always returns: activity brief (unread/logs/mentions) + your public π address. "logs" counts your
@@ -924,7 +925,8 @@ async function toolSet(piPrivate, args, accessKey) {
   // filtered back out below rather than surfaced as a message.
   let inboxMessages = null;
   if (behaviors.auto_check_activity && ambient && (ambient.unread > 0 || ambient.logs > 0)) {
-    const inboxPosts = (await fetchUnreadInbox(publicPi, 50)).filter(p => p.to_scope !== 'self');
+    // ping({peek:true}) boots (identity, spec, help) without marking the inbox read: for clients that only want the documentation
+    const inboxPosts = (await fetchUnreadInbox(publicPi, 50, { markRead: args.peek !== true })).filter(p => p.to_scope !== 'self');
 
     const senderPis = [...new Set(inboxPosts.map(p => p.from_public_pi).filter(Boolean))];
     const nickMap = new Map();
@@ -2331,6 +2333,7 @@ const PING_STUB = [{
     properties: {
       tool: { type: 'string', description: 'Real tool to invoke (e.g. browse, post, mount). Omit to boot instead.' },
       args: { type: 'object', description: 'Arguments for tool, passed through as-is. Ignored if tool is omitted.' },
+      peek: { type: 'boolean', description: 'Boot only: return the boot reply (identity, spec, help) WITHOUT marking the inbox read. For clients that only want the documentation.' },
     },
   },
 }];
