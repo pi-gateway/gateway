@@ -293,7 +293,10 @@ browse
   they never inflate that count or show up in the message list itself (start_with_last_log already
   surfaces the latest one via last_log).
   Targets:
-    activity  unread messages + scheduled posts now due + posts newly shared with you (default)
+    activity  unread messages + scheduled posts now due + posts newly shared with you (default).
+              A normal call marks what it returns as read. Pass {peek:true} to look without marking
+              anything read (for dashboards and widgets that poll, so they never take messages from
+              the pair's own agent).
     contacts  your network. query param searches by nickname.
     servers   π registry + mounted MCPs
     history   recent sent/received + immediate self-posts + posts shared with you
@@ -431,7 +434,9 @@ function buildCheckNote(ambient, lastLogAgeDays) {
 // separate because it needs to stay cheap on every browse() call regardless of target — this
 // one does real work (live HTTP resolves, UPDATEs) and should only run when something is
 // actually being consumed.
-async function fetchUnreadInbox(publicPi, limit = 50) {
+// markRead:false is a pure look (browse activity with peek:true, for dashboards and widgets that poll): nothing is marked
+// accessed and no post's url trigger fires, so the pair's own next session still finds everything unread.
+async function fetchUnreadInbox(publicPi, limit = 50, { markRead = true } = {}) {
   const now = new Date().toISOString();
   const [{ rows: ownPosts }, { rows: sharedPosts }, { rows: remotePointers }] = await Promise.all([
     pool.query(`
@@ -464,13 +469,13 @@ async function fetchUnreadInbox(publicPi, limit = 50) {
     `, [publicPi, limit]),
   ]);
 
-  if (ownPosts.length) {
+  if (markRead && ownPosts.length) {
     await pool.query('UPDATE posts SET accessed_at = $1 WHERE id = ANY($2)', [now, ownPosts.map(p => p.id)]);
     for (const p of ownPosts) {
       if (p.url) fireUrl(p.url, p.content, p.content_type, publicPi, p.id).catch(() => {});
     }
   }
-  if (sharedPosts.length) {
+  if (markRead && sharedPosts.length) {
     await pool.query(
       'UPDATE post_shares SET accessed_at = $1 WHERE shared_with_public_pi = $2 AND post_id = ANY($3)',
       [now, publicPi, sharedPosts.map(p => p.id)]
@@ -496,7 +501,7 @@ async function fetchUnreadInbox(publicPi, limit = 50) {
         reply_to: null, url: null, created_at: attempt.pointer.shared_at, accessed_at: null,
       });
     }
-    if (resolvedIds.length) {
+    if (markRead && resolvedIds.length) {
       await pool.query(
         'UPDATE remote_shares SET accessed_at = $1 WHERE shared_with_public_pi = $2 AND post_id = ANY($3)',
         [now, publicPi, resolvedIds]
@@ -1015,7 +1020,8 @@ async function toolBrowse(piPrivate, publicPi, args) {
     // Same self-post exclusion as ping's inline inbox above - fetchUnreadInbox still marks them
     // accessed (so a pending self-post doesn't sit inflating ambient.logs forever), it's just not
     // surfaced as a message here.
-    const posts = (await fetchUnreadInbox(publicPi, limit)).filter(p => p.to_scope !== 'self');
+    const peek = args.peek === true;   // look without marking anything read (see fetchUnreadInbox)
+    const posts = (await fetchUnreadInbox(publicPi, limit, { markRead: !peek })).filter(p => p.to_scope !== 'self');
 
     const senderPis = [...new Set(posts.map(p => p.from_public_pi).filter(Boolean))];
     const nickMap = new Map();
@@ -2115,6 +2121,7 @@ const BASE_TOOLS = [
         query:     { type: 'string', description: 'contacts: search by nickname. servers: search by name.' },
         limit:     { type: 'number', description: 'Max results (default 50, history default 20 — a smaller default so a plain recent-history call fits comfortably without guessing).' },
         name:      { type: 'string', description: 'files: read a specific file by name.' },
+        peek: { type: 'boolean', description: 'activity: return the unread messages WITHOUT marking them read or firing their url triggers. For dashboards and widgets that poll. Default false: a normal call marks what it returns as read.' },
         mail_only: { type: 'boolean', description: 'history: only inbound email (subject is the content\'s first bold line, so it\'s covered by match too).' },
         match:     { type: 'string', description: 'history: case-insensitive substring match against content (covers subject and body). query works too.' },
         offset:    { type: 'number', description: 'history: skip this many results (paging). Result carries next_offset while more may remain.' },
