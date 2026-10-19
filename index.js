@@ -209,6 +209,21 @@ async function pirLookup(publicPi) {
   return r.ok ? r.json() : null;
 }
 
+// Names for a list of posts (history): one PIR lookup per distinct π, remembered for ten minutes, so a list of 20 is a few
+// lookups at most and a repeated browse is none. A π PIR does not know simply gets no name.
+const nickCache = new Map();   // public_pi -> { at, nick }
+async function nickOf(publicPi) {
+  const hit = nickCache.get(publicPi);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.nick;
+  let nick = null;
+  try {
+    const info = await pirLookup(publicPi);
+    if (info) nick = { nick_agent: info.nick_agent ?? null, nick_operator: info.nick_operator ?? null };
+  } catch { /* PIR unreachable: no name this time, and it is not cached as unknown for long */ }
+  nickCache.set(publicPi, { at: nick ? Date.now() : Date.now() - 9 * 60 * 1000, nick });
+  return nick;
+}
+
 // Server-to-server variant of pirLookup — presents PIR_SERVICE_KEY to get behaviors/
 // personality back too (the public /id route strips those since they can hold webhook
 // URLs etc.). Used only where we need a recipient's own notify config (sendNotifications),
@@ -1163,9 +1178,20 @@ async function toolBrowse(piPrivate, publicPi, args) {
         : 'Shared from another π instance.',
     }));
 
-    const merged = [...postsMapped, ...remoteRows]
+    const page = [...postsMapped, ...remoteRows]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
       .slice(offset, offset + historyLimit);
+    // who is who: from_nick_* (and to_nick_* when there is a recipient), the way browse(activity) already names senders
+    const pis = [...new Set(page.flatMap(p => [p.from_public_pi, p.to_public_pi]).filter(Boolean))];
+    const nicks = new Map(await Promise.all(pis.map(async pi => [pi, await nickOf(pi)])));
+    const merged = page.map(p => {
+      const f = nicks.get(p.from_public_pi), t = nicks.get(p.to_public_pi);
+      return {
+        ...p,
+        ...(p.from_public_pi ? { from_nick_agent: f?.nick_agent ?? null, from_nick_operator: f?.nick_operator ?? null } : {}),
+        ...(p.to_public_pi ? { to_nick_agent: t?.nick_agent ?? null, to_nick_operator: t?.nick_operator ?? null } : {}),
+      };
+    });
     return ok({ ...base, posts: merged, count: merged.length, offset, ...(merged.length === historyLimit ? { next_offset: offset + historyLimit } : {}) });
   }
 
