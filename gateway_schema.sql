@@ -139,3 +139,13 @@ CREATE TABLE IF NOT EXISTS post_mutes (
 );
 
 ALTER TABLE members ADD COLUMN IF NOT EXISTS bridge_mode TEXT;   -- NULL | 'all' | 'threads'
+
+-- Per-pair message flags: star and archive (read/unread is the message's own accessed_at).
+CREATE TABLE IF NOT EXISTS post_flags (
+  public_pi  TEXT        NOT NULL,
+  post_id    UUID        NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  starred    BOOLEAN     NOT NULL DEFAULT false,
+  archived   BOOLEAN     NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (public_pi, post_id)
+);
