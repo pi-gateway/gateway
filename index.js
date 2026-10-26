@@ -315,13 +315,17 @@ browse
               the pair's own agent).
     contacts  your network. query param searches by nickname.
     servers   π registry + mounted MCPs
-    history   recent sent/received + immediate self-posts + posts shared with you
+    history   recent sent/received + immediate self-posts + posts shared with you. state filters it:
+              inbox (received, not archived) · sent · starred · archived · all (default). Rows carry
+              direction (sent/received), starred, archived; accessed_at null = unread. match/since/until/offset search and page.
     files     your documents (.md · .svg · .webp), including ones shared with you
 
 post
   Fields: content (required) · to · reply_to · url · at · name · content_type
   Recipients: self (default) · nickname · contacts · all
   Content types: json (default, 90-day TTL) · md · svg · webp (permanent)
+  Mark: post({ id, mark }) with NO content sets the state of one message in your mailbox:
+    mark = read | unread | star | unstar | archive | unarchive (read/unread is the message itself; star and archive are yours alone).
   Schedule: at = ISO timestamp. Post appears in browse(activity) when due.
   Thread: reply_to = post ID. Reply scope defaults to original recipients. Works across
     instances too, but only for a post_id you actually have — e.g. one shared with you — not
@@ -1197,6 +1201,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
       const f = nicks.get(p.from_public_pi), t = nicks.get(p.to_public_pi);
       return {
         ...p,
+        direction: p.from_public_pi === publicPi ? 'sent' : 'received',
         ...(p.from_public_pi ? { from_nick_agent: f?.nick_agent ?? null, from_nick_operator: f?.nick_operator ?? null } : {}),
         ...(p.to_public_pi ? { to_nick_agent: t?.nick_agent ?? null, to_nick_operator: t?.nick_operator ?? null } : {}),
       };
