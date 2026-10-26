@@ -1121,6 +1121,13 @@ async function toolBrowse(piPrivate, publicPi, args) {
       // never null, so this exact-match is safe and matches the shape Pitr observed live.
       conditions.push(`p.from_public_pi = ''`);
     }
+    // state: which part of the mailbox (inbox = received and not archived, sent, starred, archived); default all of it
+    const stateArg = args.state ? String(args.state) : null;
+    if (stateArg && !['inbox', 'sent', 'starred', 'archived', 'all'].includes(stateArg)) return fail('state must be inbox, sent, starred, archived or all.');
+    if (stateArg === 'inbox')    conditions.push(`p.to_public_pi = $1 AND COALESCE(f.archived, false) = false`);
+    if (stateArg === 'sent')     conditions.push(`p.from_public_pi = $1`);
+    if (stateArg === 'starred')  conditions.push(`COALESCE(f.starred, false) = true`);
+    if (stateArg === 'archived') conditions.push(`COALESCE(f.archived, false) = true`);
     if (match) {
       params.push(`%${match}%`);
       conditions.push(`p.content ILIKE $${params.length}`);
@@ -1134,7 +1141,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
     // Remote shares are pointers only (no content stored locally - see the merge below) and are
     // never mail, so both filters are meaningless against them; skip the query rather than fetch
     // rows that would just get dropped.
-    const remoteQuery = (mailOnly || match)
+    const remoteQuery = (mailOnly || match || (stateArg && stateArg !== 'all'))
       ? Promise.resolve({ rows: [] })
       : pool.query(`
           SELECT post_id, origin_gateway_mcp, from_public_pi, name, content_type, shared_at, accessed_at
@@ -1149,9 +1156,11 @@ async function toolBrowse(piPrivate, publicPi, args) {
       pool.query(`
         SELECT p.id, p.from_public_pi, p.to_scope, p.to_public_pi, p.content, p.content_type, p.name,
                p.created_at, p.accessed_at,
+               COALESCE(f.starred, false) AS starred, COALESCE(f.archived, false) AS archived,
                rr.target_post_id AS reply_to_remote_post_id, rr.target_gateway_mcp AS reply_to_remote_origin
         FROM posts p
         LEFT JOIN remote_reply_refs rr ON rr.post_id = p.id
+        LEFT JOIN post_flags f ON f.post_id = p.id AND f.public_pi = $1
         WHERE ${conditions.join(' AND ')}
         ORDER BY p.created_at DESC
         LIMIT $${params.length}
@@ -1279,6 +1288,32 @@ async function toolBrowse(piPrivate, publicPi, args) {
 
 // ── Tool: post ────────────────────────────────────────────────────────────────
 
+// post({ id, mark }) with no content: set the state of one message from this pair's point of view. read/unread is the
+// message's own accessed_at (a direct message to this pair, or a post shared with it); star/archive live per pair in post_flags.
+const MARKS = ['read', 'unread', 'star', 'unstar', 'archive', 'unarchive'];
+async function toolMark(publicPi, id, mark) {
+  if (!MARKS.includes(mark)) return fail(`mark must be one of ${MARKS.join(', ')}.`);
+  if (!id || !/^[0-9a-f-]{36}$/i.test(String(id))) return fail('mark needs the id of a message (from browse).');
+  const { rows: [vis] } = await pool.query(`
+    SELECT p.to_public_pi, p.from_public_pi, p.to_scope,
+           EXISTS (SELECT 1 FROM post_shares ps WHERE ps.post_id = p.id AND ps.shared_with_public_pi = $2) AS shared
+    FROM posts p WHERE p.id = $1`, [id, publicPi]);
+  const mine = vis && (vis.to_public_pi === publicPi || vis.from_public_pi === publicPi || vis.shared || vis.to_scope === 'all');
+  if (!mine) return fail('That message is not in your mailbox.');
+  if (mark === 'read' || mark === 'unread') {
+    const at = mark === 'read' ? new Date().toISOString() : null;
+    if (vis.to_public_pi === publicPi) await pool.query('UPDATE posts SET accessed_at = $2 WHERE id = $1 AND to_public_pi = $3', [id, at, publicPi]);
+    else if (vis.shared) await pool.query('UPDATE post_shares SET accessed_at = $3 WHERE post_id = $1 AND shared_with_public_pi = $2', [id, publicPi, at]);
+    else return fail('Only a message sent to this pair, or shared with it, has a read state (a broadcast is read for everyone at once).');
+    return ok({ id, mark, done: true });
+  }
+  const col = mark.endsWith('archive') ? 'archived' : 'starred', val = !mark.startsWith('un');
+  await pool.query(`
+    INSERT INTO post_flags (public_pi, post_id, ${col}) VALUES ($1, $2, $3)
+    ON CONFLICT (public_pi, post_id) DO UPDATE SET ${col} = $3, updated_at = NOW()`, [publicPi, id, val]);
+  return ok({ id, mark, done: true });
+}
+
 async function toolPost(piPrivate, publicPi, args) {
   const { content, reply_to, url, at, name } = args;
   const toArg = args.to;
@@ -1295,6 +1330,7 @@ async function toolPost(piPrivate, publicPi, args) {
     mountTitle = String(args.title ?? '').trim().slice(0, 120) || null;
   }
 
+  if (!content && args.mark) return toolMark(publicPi, args.id, args.mark);
   if (!content) {
     // No content, but a name + recipient — this is "share an existing post of mine", not
     // "write something new". Anything else missing content is just an error.
@@ -2149,6 +2185,7 @@ const BASE_TOOLS = [
         query:     { type: 'string', description: 'contacts: search by nickname. servers: search by name.' },
         limit:     { type: 'number', description: 'Max results (default 50, history default 20 — a smaller default so a plain recent-history call fits comfortably without guessing).' },
         name:      { type: 'string', description: 'files: read a specific file by name.' },
+        state:     { type: 'string', description: 'history: inbox (received, not archived) | sent | starred | archived | all (default). Every history row also carries starred and archived; accessed_at null = unread.' },
         peek: { type: 'boolean', description: 'activity: return the unread messages WITHOUT marking them read or firing their url triggers. For dashboards and widgets that poll. Default false: a normal call marks what it returns as read.' },
         mail_only: { type: 'boolean', description: 'history: only inbound email (subject is the content\'s first bold line, so it\'s covered by match too).' },
         match:     { type: 'string', description: 'history: case-insensitive substring match against content (covers subject and body). query works too.' },
@@ -2162,7 +2199,7 @@ const BASE_TOOLS = [
   },
   {
     name: 'post',
-    description: 'Write, send, share. Default recipient: self (a note to self). If this already exists as one of your own posts, share it by reference instead of rewriting it: post({to, name}) with NO content — works across instances too. If it exists elsewhere (e.g. Drive), paste the link as content instead of pasting the document — content over 8,000 chars sent to someone else is rejected either way. Content types: json (default, ephemeral 90-day TTL) · md · svg · webp (permanent). Recipients: self · nickname · contacts · all. Schedule via at. Thread via reply_to. Fire an external API via url.',
+    description: 'Write, send, share. Default recipient: self (a note to self). If this already exists as one of your own posts, share it by reference instead of rewriting it: post({to, name}) with NO content — works across instances too. If it exists elsewhere (e.g. Drive), paste the link as content instead of pasting the document — content over 8,000 chars sent to someone else is rejected either way. Content types: json (default, ephemeral 90-day TTL) · md · svg · webp (permanent). Recipients: self · nickname · contacts · all. Schedule via at. Thread via reply_to. Fire an external API via url. Mark a message: post({id, mark}) with no content (read · unread · star · unstar · archive · unarchive).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2171,6 +2208,8 @@ const BASE_TOOLS = [
         content_type: { type: 'string', description: 'json (default) | md | svg | webp. Inferred from content if omitted.' },
         name:         { type: 'string', description: 'Filename for permanent files (md/svg/webp). Also used to share: an existing post with this name, no content, shares it instead of writing new.' },
         reply_to:     { type: 'string', description: 'Post ID to reply to. Threads replies to original recipients.' },
+        id:           { type: 'string', description: 'With mark and NO content: the message to change (an id from browse).' },
+        mark:         { type: 'string', description: 'With id and NO content: read | unread | star | unstar | archive | unarchive. Sets the state of one message in your mailbox; read/unread is the message itself, star/archive are yours alone.' },
         url:          { type: 'string', description: 'External API endpoint to fire on post.' },
         at:           { type: 'string', description: 'ISO timestamp for scheduled release.' },
         mount_url:    { type: 'string', description: 'Community instances: share an experiment. https URL of an MCP server others can mount. Use with to: "all" and a title.' },
@@ -3554,4 +3593,9 @@ app.post(`${PREFIX}/messages`, handleOuter);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
+// per-pair message flags (star, archive); also in gateway_schema.sql
+pool.query(`CREATE TABLE IF NOT EXISTS post_flags (
+  public_pi TEXT NOT NULL, post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  starred BOOLEAN NOT NULL DEFAULT false, archived BOOLEAN NOT NULL DEFAULT false, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (public_pi, post_id))`).catch(e => console.error('post_flags table:', e.message));
 app.listen(PORT, '127.0.0.1', () => console.log(`Gateway v${GATEWAY_VERSION} listening on port ${PORT}`));
