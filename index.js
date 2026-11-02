@@ -19,6 +19,17 @@ import {
 
 const { Pool } = pg;
 const pool   = new Pool({ connectionString: process.env.GW_DB_URL });
+
+// Message groups (2 Nov 2026, Paul): a post to "contacts" is one row per contact. group_id ties those rows together and group_size says how many people it went to, so a client can show
+// it as ONE conversation (a channel: the sender and the others) instead of N unrelated messages. Made here, at start-up, so every instance on this code migrates itself.
+let GROUPS = false;
+try {   // the columns may already be there (made once by the table owner: this database user may not be allowed to ALTER); only then is nothing asked of the database
+  const { rows: [have] } = await pool.query("SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'posts' AND column_name IN ('group_id', 'group_size')");
+  if (have.n < 2) await pool.query('ALTER TABLE posts ADD COLUMN IF NOT EXISTS group_id UUID, ADD COLUMN IF NOT EXISTS group_size INT');
+  GROUPS = true; }
+catch (e) { console.error('[message groups] unavailable on this database: ' + e.message); }
+const GROUP_COLS = GROUPS ? ', p.group_id, p.group_size' : '';
+
 const app    = express();
 app.disable('x-powered-by');
 const upload = multer({
@@ -460,7 +471,7 @@ async function fetchUnreadInbox(publicPi, limit = 50, { markRead = true } = {}) 
   const now = new Date().toISOString();
   const [{ rows: ownPosts }, { rows: sharedPosts }, { rows: remotePointers }] = await Promise.all([
     pool.query(`
-      SELECT p.id, p.from_public_pi, p.to_scope, p.content, p.content_type, p.name, p.reply_to, p.url,
+      SELECT p.id, p.from_public_pi, p.to_scope, p.content, p.content_type, p.name, p.reply_to, p.url${GROUP_COLS},
              p.created_at, p.accessed_at,
              rr.target_post_id AS reply_to_remote_post_id, rr.target_gateway_mcp AS reply_to_remote_origin
       FROM posts p
@@ -1158,7 +1169,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
 
     const [{ rows: posts }, { rows: remotePointers }] = await Promise.all([
       pool.query(`
-        SELECT p.id, p.from_public_pi, p.to_scope, p.to_public_pi, p.content, p.content_type, p.name,
+        SELECT p.id, p.from_public_pi, p.to_scope, p.to_public_pi, p.content, p.content_type, p.name, p.reply_to${GROUP_COLS},
                p.created_at, p.accessed_at,
                COALESCE(f.starred, false) AS starred, COALESCE(f.archived, false) AS archived,
                rr.target_post_id AS reply_to_remote_post_id, rr.target_gateway_mcp AS reply_to_remote_origin
@@ -1480,13 +1491,14 @@ async function toolPost(piPrivate, publicPi, args) {
     if (!myContacts.length) return ok({ posted: false, note: 'No contacts yet. Post to a nickname first.' });
 
     const results = [];
+    const groupId = GROUPS && myContacts.length > 1 ? randomUUID() : null;   // one message to several people: its rows share a group
     for (const c of myContacts) {
       const target = await pirLookup(c.contact_public_pi);
       if (!target) continue;
       const { rows: [post] } = await pool.query(`
-        INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at)
-        VALUES ($1, 'nickname', $2, $3, $4, $5, $6, $7, $8) RETURNING id
-      `, [publicPi, c.contact_public_pi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null]);
+        INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at${groupId ? ', group_id' : ''})
+        VALUES ($1, 'nickname', $2, $3, $4, $5, $6, $7, $8${groupId ? ', $9' : ''}) RETURNING id
+      `, [publicPi, c.contact_public_pi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null, ...(groupId ? [groupId] : [])]);
       if (remoteReplyTarget) await recordRemoteReplyRef(post?.id, remoteReplyTarget);
       const delivered = await deliverToGateway({
         from_public_pi: publicPi, to_public_pi: c.contact_public_pi,
@@ -1496,6 +1508,7 @@ async function toolPost(piPrivate, publicPi, args) {
       }, target);
       results.push({ to: c.contact_nick_agent ?? c.contact_public_pi, delivered });
     }
+    if (groupId) await pool.query('UPDATE posts SET group_size = $1 WHERE group_id = $2', [results.length, groupId]);   // how many people it went to (a group of one is no group)
     return ok({
       posted: true, to: 'contacts', count: results.length, results,
       ...(remoteReplyTarget ? { replying_to: remoteReplyTarget } : {}),

@@ -149,3 +149,7 @@ CREATE TABLE IF NOT EXISTS post_flags (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (public_pi, post_id)
 );
+
+-- Message groups (2 Nov 2026): the rows of one post to contacts share a group_id; group_size = how many people it went to. The gateway adds these at start-up when its database user may ALTER;
+-- otherwise run once as the table owner:
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS group_id UUID, ADD COLUMN IF NOT EXISTS group_size INT;
