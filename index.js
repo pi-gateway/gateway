@@ -310,7 +310,7 @@ function buildHelp() {
 ping
   Commission a new pair or boot an existing one. Config: personality, behaviors, auto_mount, gateway_mcp.
   Behaviors (all on by default): auto_log · session_end_log · start_with_last_log · auto_check_activity
-  Notify (off by default, needs your own): ping({notify:{slack, email}}) — Slack incoming-webhook URL / email address, from your own workspace. One call, takes effect on the next message.
+  Notify (off by default, needs your own): ping({notify:{slack, email, board}}) — Slack incoming-webhook URL / email address, from your own workspace; board = an https URL of your own MachSyn board that is told (a bare {event, at}, never the content) when a note or message lands, so the board looks at once instead of waiting for its next poll. One call, takes effect on the next message.
   Call ping with no args to see current config. A boot also returns your unread inbox and marks it read;
   ping({peek:true}) boots without marking anything read (for clients that only want this documentation).
 
@@ -655,7 +655,13 @@ async function sendNotifications(recipientPi, payload) {
     const beh         = pirRecord?.behaviors ?? {};
     const slackUrl    = beh.notify_slack;
     const notifyEmail = beh.notify_email;
-    if (!slackUrl && !notifyEmail) return;
+    const boardUrl    = beh.notify_board;
+    const isNote      = payload.content_type === 'note';
+    // the board is told THAT something arrived (a note or a message), never what: it looks itself, with its own credentials
+    if (boardUrl && boardUrl.toLowerCase().startsWith('https://')) {
+      safeFetch(boardUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event: isNote ? 'note' : 'message', at: Date.now() }) }).catch(() => {});
+    }
+    if (isNote || (!slackUrl && !notifyEmail)) return;   // a note is for the board only: no Slack, no mail
 
     // 'operator' is PIR's literal default when nick_operator was never set (see /pir/id
     // POST) - a pair that never customises it has its real identity in nick_agent only.
@@ -890,6 +896,10 @@ async function toolSet(piPrivate, args, accessKey) {
     const mergedBehaviors = { ...(existing?.behaviors ?? {}), ...(pirUpdates.behaviors ?? {}) };
     if (args.notify?.slack !== undefined) mergedBehaviors.notify_slack = args.notify.slack ?? null;
     if (args.notify?.email !== undefined) mergedBehaviors.notify_email = args.notify.email ?? null;
+    if (args.notify?.board !== undefined) {   // an https URL only (the egress guard checks where it points when it is used); null clears it
+      const b = args.notify.board;
+      mergedBehaviors.notify_board = b == null || b === '' ? null : (typeof b === 'string' && b.length <= 400 && b.toLowerCase().startsWith('https://') && !/\s/.test(b) ? b : (mergedBehaviors.notify_board ?? null));
+    }
     pirUpdates.behaviors = mergedBehaviors;
   }
 
@@ -984,7 +994,7 @@ async function toolSet(piPrivate, args, accessKey) {
     status:   'connected',
     identity: { public_pi: publicPi, nick_agent: validated.nick_agent, nick_operator: validated.nick_operator },
     spec:     buildSpec(publicPi, validated.nick_operator, validated.nick_agent),
-    config:   { personality, behaviors, auto_mount: autoMountUrls, notify: { slack: behaviors.notify_slack ?? null, email: behaviors.notify_email ?? null } },
+    config:   { personality, behaviors, auto_mount: autoMountUrls, notify: { slack: behaviors.notify_slack ?? null, email: behaviors.notify_email ?? null, board: behaviors.notify_board ?? null } },
     help:     buildHelp(),
     ...(isNewPair ? {
       onboarding: {
@@ -1556,7 +1566,7 @@ async function toolPost(piPrivate, publicPi, args) {
       'SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
     );
     delivered = recipientSession ? true : await deliverToUrl(payload, target.gateway_mcp);
-    if (recipientSession && content_type !== 'note') void sendNotifications(target.public_pi, payload);
+    if (recipientSession) void sendNotifications(target.public_pi, payload);   // a note only pings the board (inside); Slack / mail skip notes
   } else {
     delivered = await deliverToUrl(payload, target.gateway_mcp);
   }
@@ -2184,7 +2194,7 @@ const BASE_TOOLS = [
         cc_public_pi:  { type: 'string', description: 'π address to CC on all incoming messages.' },
         personality:   { type: 'string', description: 'Agent personality text.' },
         behaviors:     { type: 'object', description: 'Behavior toggles: auto_log, session_end_log, start_with_last_log, auto_check_activity.' },
-        notify:        { type: 'object', description: 'Push notifications for incoming messages, independent of active connection. { slack: "<incoming webhook URL, from your own Slack workspace>", email: "<address>" }. Pass null to clear either.' },
+        notify:        { type: 'object', description: 'Push notifications for incoming messages, independent of active connection. { slack: "<incoming webhook URL, from your own Slack workspace>", email: "<address>", board: "<https URL of your own board: it is told that something arrived, without the content>" }. Pass null to clear any.' },
         auto_mount:     { type: 'array', items: { type: 'string' }, description: 'MCP URLs to auto-mount at every boot for extra tools. Pure tool-extension - never replaces your base toolset (ping/browse/post/mount always come from gateway_mcp). Any tool name that collides with your base toolset or another mount is dropped, not overridden.' },
         gateway_mcp:    { type: 'string', description: 'Your gateway MCP URL (updated in PIR).' },
         bridge:         { type: 'string', description: 'Community instances: push posts to your home on another π server. "all" = every broadcast, "threads" = only threads you follow, "off" to stop.' },
