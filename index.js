@@ -2860,6 +2860,24 @@ function cleanupExpiredAttachments() {
 setInterval(cleanupExpiredAttachments, 6 * 60 * 60 * 1000);
 cleanupExpiredAttachments();
 
+// Retention for NOTES (content_type 'note', for a person's board; 4 Nov 2026, Paul): an unread note is kept 90 days, a read one 30 days after it was read. Ordinary messages are not
+// touched. Runs a minute after start and every 6 hours. Env NOTE_RETENTION_OFF=1 switches it off; NOTE_UNREAD_DAYS / NOTE_READ_DAYS change the periods.
+const NOTE_UNREAD_DAYS = Math.max(1, parseInt(process.env.NOTE_UNREAD_DAYS, 10) || 90);
+const NOTE_READ_DAYS   = Math.max(1, parseInt(process.env.NOTE_READ_DAYS, 10) || 30);
+async function cleanupOldNotes() {
+  if (process.env.NOTE_RETENTION_OFF === '1') return;
+  try {
+    const r = await pool.query(
+      `DELETE FROM posts WHERE content_type = 'note'
+         AND ((accessed_at IS NULL AND created_at < NOW() - make_interval(days => $1))
+           OR (accessed_at IS NOT NULL AND accessed_at < NOW() - make_interval(days => $2)))`,
+      [NOTE_UNREAD_DAYS, NOTE_READ_DAYS]);
+    if (r.rowCount) console.log(`[retention] removed ${r.rowCount} old note(s)`);
+  } catch (e) { console.error('[retention] notes:', e.message); }
+}
+setInterval(cleanupOldNotes, 6 * 60 * 60 * 1000);
+setTimeout(cleanupOldNotes, 60 * 1000);
+
 function verifyMailgunSignature(form) {
   const signingKey = process.env.MAILGUN_SIGNING_KEY;
   if (!signingKey) {
