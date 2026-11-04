@@ -330,11 +330,14 @@ browse
               inbox (received, not archived) · sent · starred · archived · all (default). Rows carry
               direction (sent/received), starred, archived; accessed_at null = unread. match/since/until/offset search and page.
     files     your documents (.md · .svg · .webp), including ones shared with you
+    notes     notes sent to you for your MachSyn board (content_type note). They never appear in activity, history or the boot inbox, and nothing is marked
+              read by listing them; unread:true lists the unread ones; mark one with post({ id, mark }). Same row shape as history.
 
 post
   Fields: content (required) · to · reply_to · url · at · name · content_type
   Recipients: self (default) · nickname · contacts · all
   Content types: json (default, 90-day TTL) · md · svg · webp (permanent)
+              · note (a note for the recipient's board: kept out of every agent-facing read, no notification)
   Mark: post({ id, mark }) with NO content sets the state of one message in your mailbox:
     mark = read | unread | star | unstar | archive | unarchive (read/unread is the message itself; star and archive are yours alone).
   Schedule: at = ISO timestamp. Post appears in browse(activity) when due.
@@ -381,6 +384,7 @@ async function getAmbient(publicPi) {
       SELECT id, to_scope FROM posts
       WHERE (to_public_pi = $1 ${COMMUNITY ? '' : "OR to_scope = 'all'"})
         AND accessed_at IS NULL
+        AND content_type <> 'note'
         AND (at IS NULL OR at <= $2)
     `, [publicPi, now]),
     pool.query(`SELECT 1 FROM post_shares WHERE shared_with_public_pi = $1 AND accessed_at IS NULL`, [publicPi]),
@@ -478,6 +482,7 @@ async function fetchUnreadInbox(publicPi, limit = 50, { markRead = true } = {}) 
       LEFT JOIN remote_reply_refs rr ON rr.post_id = p.id
       WHERE (p.to_public_pi = $1 ${COMMUNITY ? '' : "OR p.to_scope = 'all'"})
         AND p.accessed_at IS NULL
+        AND p.content_type <> 'note'
         AND (p.at IS NULL OR p.at <= $2)
       ORDER BY p.created_at ASC
       LIMIT $3
@@ -1108,7 +1113,8 @@ async function toolBrowse(piPrivate, publicPi, args) {
     });
   }
 
-  if (target === 'history') {
+  if (target === 'history' || target === 'notes') {
+    const notesView = target === 'notes';   // notes for the board: received only, never in history, never marked by looking
     // Pitr feature request, 23 Sep 2026: a plain browse(history) call could still overrun the
     // tool's own response-size cap (56k+ chars) at the shared default of 50, and there was no way
     // to ask for "just the mail" or "just recent" without guessing a smaller `limit`. Fixes below
@@ -1131,6 +1137,8 @@ async function toolBrowse(piPrivate, publicPi, args) {
 
     const conditions = ['(p.from_public_pi = $1 OR p.to_public_pi = $1 OR p.id IN (SELECT post_id FROM post_shares WHERE shared_with_public_pi = $1))'];
     const params = [publicPi];
+    conditions.push(notesView ? "p.content_type = 'note' AND p.to_public_pi = $1" : "p.content_type <> 'note'");
+    if (notesView && args.unread === true) conditions.push('p.accessed_at IS NULL');
     if (mailOnly) {
       // Inbound email is stored with from_public_pi = '' (see the Mailgun inbound handler below) -
       // never null, so this exact-match is safe and matches the shape Pitr observed live.
@@ -1156,7 +1164,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
     // Remote shares are pointers only (no content stored locally - see the merge below) and are
     // never mail, so both filters are meaningless against them; skip the query rather than fetch
     // rows that would just get dropped.
-    const remoteQuery = (mailOnly || match || (stateArg && stateArg !== 'all'))
+    const remoteQuery = (notesView || mailOnly || match || (stateArg && stateArg !== 'all'))
       ? Promise.resolve({ rows: [] })
       : pool.query(`
           SELECT post_id, origin_gateway_mcp, from_public_pi, name, content_type, shared_at, accessed_at
@@ -1299,7 +1307,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
     return ok({ ...base, docs, note: 'To read a doc: browse({ target: "docs", name: "concepts" })' });
   }
 
-  return fail(`Unknown target "${target}". Use: activity · contacts · servers · history · files · docs`);
+  return fail(`Unknown target "${target}". Use: activity · contacts · servers · history · notes · files · docs`);
 }
 
 // ── Tool: post ────────────────────────────────────────────────────────────────
@@ -1396,7 +1404,7 @@ async function toolPost(piPrivate, publicPi, args) {
   const threadRoot = COMMUNITY && originalReplyRow ? (originalReplyRow.thread_id ?? reply_to) : null;
 
   const content_type = args.content_type || inferContentType(content);
-  const fileName     = name || (content_type !== 'json' ? `post-${Date.now()}.${content_type}` : null);
+  const fileName     = name || (content_type !== 'json' && content_type !== 'note' ? `post-${Date.now()}.${content_type}` : null);
 
   const senderInfo = await pirLookup(publicPi);
 
@@ -1548,7 +1556,7 @@ async function toolPost(piPrivate, publicPi, args) {
       'SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]
     );
     delivered = recipientSession ? true : await deliverToUrl(payload, target.gateway_mcp);
-    if (recipientSession) void sendNotifications(target.public_pi, payload);
+    if (recipientSession && content_type !== 'note') void sendNotifications(target.public_pi, payload);
   } else {
     delivered = await deliverToUrl(payload, target.gateway_mcp);
   }
