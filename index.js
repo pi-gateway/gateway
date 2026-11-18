@@ -1418,7 +1418,7 @@ async function toolPost(piPrivate, publicPi, args) {
 
   const senderInfo = await pirLookup(publicPi);
 
-  const toRaw = resolvedTo.startsWith('@') ? resolvedTo.slice(1) : resolvedTo;
+  let toRaw = resolvedTo.startsWith('@') ? resolvedTo.slice(1) : resolvedTo;
 
   // Fail fast rather than let a huge paste crawl through generation before it can even send.
   // Self posts are exempt — authored fresh either way, no one else's generation cost being
@@ -1531,6 +1531,57 @@ async function toolPost(piPrivate, publicPi, args) {
       posted: true, to: 'contacts', count: results.length, results,
       ...(remoteReplyTarget ? { replying_to: remoteReplyTarget } : {}),
     });
+  }
+
+  // Several named recipients (18 Nov 2026, the operator): "to" as a comma list ("Eash, 3.14...") is ONE message to several people. One row per person, tied together by a group_id exactly like a
+  // post to "contacts", so a client shows it as a channel (a conversation of several people), not as separate direct messages. Up to 8; not on a community instance (broadcast only).
+  if (!COMMUNITY && toRaw.includes(',')) {
+    const wanted = [...new Set(toRaw.split(',').map(x => x.trim().replace(/^@/, '')).filter(Boolean))].slice(0, 8);
+    const targets = [];
+    for (const n of wanted) {
+      const rr = await resolveRecipient(n);
+      if (rr.ambiguous) {
+        return ok({
+          status:  'ambiguous',
+          message: `Multiple pairs found for "${n}". Be specific — use the π address.`,
+          matches: rr.matches.map(r => ({ public_pi: r.public_pi, nick_agent: r.nick_agent, nick_operator: r.nick_operator })),
+        });
+      }
+      if (!rr.target) return fail(`No pair found for "${n}". Try browse({ target: "contacts", query: "${n}" }).`);
+      if (rr.target.public_pi !== publicPi && !targets.some(t => t.public_pi === rr.target.public_pi)) targets.push(rr.target);
+    }
+    if (!targets.length) return fail('A message needs somebody other than yourself to go to.');
+    if (targets.length > 1) {
+      const groupId = GROUPS ? randomUUID() : null;
+      const results = [];
+      for (const target of targets) {
+        const { rows: [post] } = await pool.query(`
+          INSERT INTO posts (from_public_pi, to_scope, to_public_pi, content, content_type, name, reply_to, url, at${groupId ? ', group_id' : ''})
+          VALUES ($1, 'nickname', $2, $3, $4, $5, $6, $7, $8${groupId ? ', $9' : ''}) RETURNING id
+        `, [publicPi, target.public_pi, content, content_type, fileName ?? null, safeReplyTo, url ?? null, at ?? null, ...(groupId ? [groupId] : [])]);
+        if (remoteReplyTarget) await recordRemoteReplyRef(post?.id, remoteReplyTarget);
+        const payload = {
+          from_public_pi: publicPi, to_public_pi: target.public_pi,
+          content, content_type, name: fileName ?? null, reply_to: safeReplyTo, url: url ?? null, at: at ?? null,
+          from_nick_agent: senderInfo?.nick_agent ?? null, from_nick_operator: senderInfo?.nick_operator ?? null,
+          post_id: post?.id,
+        };
+        let delivered;
+        if (!target.gateway_mcp || isSelfUrl(target.gateway_mcp)) {
+          const { rows: [recipientSession] } = await pool.query('SELECT public_pi FROM mcp_sessions WHERE public_pi = $1', [target.public_pi]);
+          delivered = recipientSession ? true : await deliverToUrl(payload, target.gateway_mcp);
+          if (recipientSession) void sendNotifications(target.public_pi, payload);
+        } else {
+          delivered = await deliverToUrl(payload, target.gateway_mcp);
+        }
+        await upsertContact(piPrivate, { public_pi: target.public_pi });
+        results.push({ to: target.nick_agent ?? target.public_pi, delivered });
+      }
+      if (groupId) await pool.query('UPDATE posts SET group_size = $1 WHERE group_id = $2', [results.length, groupId]);
+      return ok({ posted: true, to: targets.map(t => t.public_pi).join(', '), count: results.length, results, group: !!groupId });
+    }
+    // one person after all (the same pair twice, or myself in the list): carry on as a plain message to that person
+    toRaw = targets[0].public_pi;
   }
 
   // Nickname or π address
