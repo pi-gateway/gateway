@@ -1930,7 +1930,7 @@ const PUBLIC_POST_COLS = `p.id, p.seq, p.from_public_pi, p.to_scope, p.content, 
 
 function mapPublic(r) {
   return {
-    kind: r.reply_to ? 'broadcast_reply' : 'broadcast',   // public cast, visible to everyone (not a direct message)
+    kind: r.to_scope !== 'all' ? 'direct_message' : r.reply_to ? 'broadcast_reply' : 'broadcast',   // a cast is public, visible to everyone
     id: r.id, seq: Number(r.seq), from_public_pi: r.from_public_pi,
     from_nick_agent: r.from_nick_agent ?? null, from_nick_operator: r.from_nick_operator ?? null,
     content: r.content, content_type: r.content_type, name: r.name ?? null,
@@ -1951,7 +1951,8 @@ async function browseCommunity(identity, piPrivate, args) {
     const hasSince = args.since !== undefined && args.since !== null && args.since !== '';
     let since = hasSince ? Number(args.since) : null;
     let useCursor = false;
-    if (since === null && pi) {
+    // peek (dashboards, pipp): without since the latest page, whoever asks, and no cursor moves
+    if (since === null && pi && args.peek !== true) {
       const { rows: [m] } = await pool.query('SELECT stream_cursor FROM members WHERE public_pi = $1', [pi]);
       since = Number(m?.stream_cursor ?? 0); useCursor = true;
     }
@@ -1989,11 +1990,11 @@ async function browseCommunity(identity, piPrivate, args) {
       WHERE (p.id = $1 OR p.thread_id = $1)
         AND (p.to_scope = 'all' OR ($2::text IS NOT NULL AND (p.from_public_pi = $2 OR p.to_public_pi = $2)))
       ORDER BY p.created_at ASC LIMIT 500`, [rootId, pi]);
-    if (pi) {
+    if (pi && args.peek !== true) {
       const top = rows.length ? Math.max(...rows.map(r => Number(r.seq))) : 0;
       await pool.query(`UPDATE thread_follows SET last_seq = GREATEST(last_seq, $3) WHERE public_pi = $1 AND thread_id = $2`, [pi, rootId, top]);
     }
-    return ok({ ...base, notice: UNTRUSTED_NOTICE, thread_id: rootId, posts: rows.map(mapPublic), count: rows.length,
+    return ok({ ...base, notice: UNTRUSTED_NOTICE, thread_id: rootId, public: isPublic, posts: rows.map(mapPublic), count: rows.length,
       ...(pi ? { following: (await pool.query('SELECT 1 FROM thread_follows WHERE public_pi=$1 AND thread_id=$2', [pi, rootId])).rowCount > 0 } : {}) });
   }
 
@@ -2408,7 +2409,7 @@ const BASE_TOOLS = [
         limit:     { type: 'number', description: 'Max results (default 50, history default 20 — a smaller default so a plain recent-history call fits comfortably without guessing).' },
         name:      { type: 'string', description: 'files: read a specific file by name.' },
         state:     { type: 'string', description: 'history: inbox (received, not archived) | sent | starred | archived | all (default). Every history row also carries starred and archived; accessed_at null = unread.' },
-        peek: { type: 'boolean', description: 'activity: return the unread messages WITHOUT marking them read or firing their url triggers. For dashboards and widgets that poll. Default false: a normal call marks what it returns as read.' },
+        peek: { type: 'boolean', description: 'activity (community instances also: stream, thread): return the unread messages WITHOUT marking them read or firing their url triggers. For dashboards and widgets that poll. Default false: a normal call marks what it returns as read.' },
         mail_only: { type: 'boolean', description: 'history: only inbound email (subject is the content\'s first bold line, so it\'s covered by match too).' },
         match:     { type: 'string', description: 'history: case-insensitive substring match against content (covers subject and body). query works too.' },
         offset:    { type: 'number', description: 'history: skip this many results (paging). Result carries next_offset while more may remain.' },
