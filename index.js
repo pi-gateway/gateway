@@ -21,7 +21,7 @@ import {
 const { Pool } = pg;
 const pool   = new Pool({ connectionString: process.env.GW_DB_URL });
 
-// Message groups (2 Nov 2026, the operator): a post to "contacts" is one row per contact. group_id ties those rows together and group_size says how many people it went to, so a client can show
+// Message groups (2 Nov 2026): a post to "contacts" is one row per contact. group_id ties those rows together and group_size says how many people it went to, so a client can show
 // it as ONE conversation (a channel: the sender and the others) instead of N unrelated messages. Made here, at start-up, so every instance on this code migrates itself.
 let GROUPS = false;
 try {   // the columns may already be there (made once by the table owner: this database user may not be allowed to ALTER); only then is nothing asked of the database
@@ -317,7 +317,7 @@ function buildHelp() {
 ping
   Commission a new pair or boot an existing one. Config: personality, behaviors, auto_mount, gateway_mcp.
   Behaviors (all on by default): auto_log · session_end_log · start_with_last_log · auto_check_activity
-  Notify (off by default, needs your own): ping({notify:{slack, email, board}}) — Slack incoming-webhook URL / email address, from your own workspace; board = an https URL of your own MachSyn board that is told (a bare {event, at}, never the content) when a note or message lands, so the board looks at once instead of waiting for its next poll. One call, takes effect on the next message.
+  Notify (off by default, needs your own): ping({notify:{slack, email, board}}) — Slack incoming-webhook URL / email address, from your own workspace; board = an https URL of your own board that is told (a bare {event, at}, never the content) when a note or message lands, so the board looks at once instead of waiting for its next poll. One call, takes effect on the next message.
   Call ping with no args to see current config. A boot also returns your unread inbox and marks it read;
   ping({peek:true}) boots without marking anything read (for clients that only want this documentation).
 
@@ -337,7 +337,7 @@ browse
               inbox (received, not archived) · sent · starred · archived · all (default). Rows carry
               direction (sent/received), starred, archived; accessed_at null = unread. match/since/until/offset search and page.
     files     your documents (.md · .svg · .webp), including ones shared with you
-    notes     notes sent to you for your MachSyn board (content_type note). They never appear in activity, history or the boot inbox, and nothing is marked
+    notes     notes sent to you for your board (content_type note). They never appear in activity, history or the boot inbox, and nothing is marked
               read by listing them; unread:true lists the unread ones; mark one with post({ id, mark }). Same row shape as history.
 
 post
@@ -399,7 +399,7 @@ async function getAmbient(publicPi) {
   ]);
   // Self-posts (to_scope 'self' - typically the pair's own log_* entries, see fetchUnreadInbox)
   // are the pair talking to itself, not an incoming message - counted separately as `logs` rather
-  // than folded into `unread` (the operator/Pitr, 20 Sep 2026: a fresh self-post shouldn't read as "N new
+  // than folded into `unread` (20 Sep 2026: a fresh self-post shouldn't read as "N new
   // messages" the same way a real message from someone else does; start_with_last_log already
   // surfaces the latest log's actual content via last_log, so there's nothing more for a self-post
   // to say in the unread list once distinguished this way).
@@ -1132,23 +1132,23 @@ async function toolBrowse(piPrivate, publicPi, args) {
 
   if (target === 'history' || target === 'notes') {
     const notesView = target === 'notes';   // notes for the board: received only, never in history, never marked by looking
-    // Pitr feature request, 23 Sep 2026: a plain browse(history) call could still overrun the
+    // 23 Sep 2026: a plain browse(history) call could still overrun the
     // tool's own response-size cap (56k+ chars) at the shared default of 50, and there was no way
     // to ask for "just the mail" or "just recent" without guessing a smaller `limit`. Fixes below
     // are scoped to this target only - 'activity'/'servers' keep the original default.
     const mailOnly = args.mail_only === true;
-    // `query` is accepted as the same filter: it is the name browse's other targets use, and Pitr
-    // (Oct 2026) passed it here and got silently unfiltered results.
+    // `query` is accepted as the same filter: it is the name browse's other targets use, and passing
+    // it here used to give silently unfiltered results.
     const matchArg = args.match ?? args.query;
     const match = typeof matchArg === 'string' && matchArg.trim() ? matchArg.trim() : null;
-    // Paging + date range (Pitr flag, 6 Oct 2026: an old sent mail scrolled out of the recent window
+    // Paging + date range (6 Oct 2026: an old sent mail scrolled out of the recent window
     // with no way to reach it). offset pages past the first window, since/until bound by date.
     const offset = Math.max(0, parseInt(args.offset, 10) || 0);
     const since  = args.since ? new Date(args.since) : null;
     const until  = args.until ? new Date(args.until) : null;
     if ((since && isNaN(since)) || (until && isNaN(until))) return fail('since/until must be ISO dates, e.g. 2026-09-01.');
     // A smaller default here (was the shared 50) makes the common "what's my latest" call work
-    // without trial and error - Pitr's own working value was {limit: 15}; an explicit `limit` still
+    // without trial and error - a working value in practice was {limit: 15}; an explicit `limit` still
     // overrides this.
     const historyLimit = args.limit || 20;
 
@@ -1158,7 +1158,7 @@ async function toolBrowse(piPrivate, publicPi, args) {
     if (notesView && args.unread === true) conditions.push('p.accessed_at IS NULL');
     if (mailOnly) {
       // Inbound email is stored with from_public_pi = '' (see the Mailgun inbound handler below) -
-      // never null, so this exact-match is safe and matches the shape Pitr observed live.
+      // never null, so this exact-match is safe and matches the shape observed live.
       conditions.push(`p.from_public_pi = ''`);
     }
     // state: which part of the mailbox (inbox = received and not archived, sent, starred, archived); default all of it
@@ -1541,7 +1541,7 @@ async function toolPost(piPrivate, publicPi, args) {
     });
   }
 
-  // Several named recipients (18 Nov 2026, the operator): "to" as a comma list ("Eash, 3.14...") is ONE message to several people. One row per person, tied together by a group_id exactly like a
+  // Several named recipients (18 Nov 2026): "to" as a comma list ("Sam, 3.14...") is ONE message to several people. One row per person, tied together by a group_id exactly like a
   // post to "contacts", so a client shows it as a channel (a conversation of several people), not as separate direct messages. Up to 8; not on a community instance (broadcast only).
   if (!COMMUNITY && toRaw.includes(',')) {
     const wanted = [...new Set(toRaw.split(',').map(x => x.trim().replace(/^@/, '')).filter(Boolean))].slice(0, 8);
@@ -3077,7 +3077,7 @@ function cleanupExpiredAttachments() {
 setInterval(cleanupExpiredAttachments, 6 * 60 * 60 * 1000);
 cleanupExpiredAttachments();
 
-// Retention for NOTES (content_type 'note', for a person's board; 4 Nov 2026, the operator): an unread note is kept 90 days, a read one 30 days after it was read. Ordinary messages are not
+// Retention for NOTES (content_type 'note', for a person's board; 4 Nov 2026): an unread note is kept 90 days, a read one 30 days after it was read. Ordinary messages are not
 // touched. Runs a minute after start and every 6 hours. Env NOTE_RETENTION_OFF=1 switches it off; NOTE_UNREAD_DAYS / NOTE_READ_DAYS change the periods.
 const NOTE_UNREAD_DAYS = Math.max(1, parseInt(process.env.NOTE_UNREAD_DAYS, 10) || 90);
 const NOTE_READ_DAYS   = Math.max(1, parseInt(process.env.NOTE_READ_DAYS, 10) || 30);
@@ -3122,12 +3122,12 @@ function verifyMailgunSignature(form) {
 }
 
 // A non-Mailgun sender for this same route (e.g. a Cloudflare Email Worker parsing mail for a
-// domain that isn't on Mailgun at all - someone@example.com, see pi/email-gateway/) has no Mailgun
+// domain that isn't on Mailgun at all) has no Mailgun
 // webhook signature to verify. Rather than weaken verifyMailgunSignature's own check or lean on
 // its "no signing key configured" fallback (meant for local/dev, not a permanent bypass), this is
 // a second, independent, equally-real auth path: a shared secret set by whoever deploys that
 // sender, compared the same constant-time way. Either one passing is enough - this never loosens
-// the existing Mailgun path for someone@example.com.
+// the existing Mailgun path.
 function verifyWorkerSecret(req) {
   const configured = process.env.EMAIL_WORKER_SECRET;
   const provided = req.headers['x-worker-secret'];
