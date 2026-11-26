@@ -3895,6 +3895,7 @@ app.post(`${PREFIX}/messages`, handleOuter);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
+if (COMMUNITY) {   // invite-only join and persisted OAuth clients exist on community instances only
 pool.query(`CREATE TABLE IF NOT EXISTS invites (
   code_hash TEXT PRIMARY KEY, inviter TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, used_by TEXT)`)
@@ -3902,6 +3903,7 @@ pool.query(`CREATE TABLE IF NOT EXISTS invites (
   .catch(e => console.error('invites table:', e.message));
 pool.query('CREATE TABLE IF NOT EXISTS oauth_clients (client_id TEXT PRIMARY KEY, redirect_uris JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())').catch(e => console.error('oauth_clients table:', e.message));
 pool.query('ALTER TABLE members ADD COLUMN IF NOT EXISTS invited_by TEXT').catch(e => console.error('invited_by col:', e.message));
+}
 // per-pair message flags (star, archive); also in gateway_schema.sql
 pool.query(`CREATE TABLE IF NOT EXISTS post_flags (
   public_pi TEXT NOT NULL, post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
