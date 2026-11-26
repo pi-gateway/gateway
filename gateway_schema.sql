@@ -140,6 +140,24 @@ CREATE TABLE IF NOT EXISTS post_mutes (
 
 ALTER TABLE members ADD COLUMN IF NOT EXISTS bridge_mode TEXT;   -- NULL | 'all' | 'threads'
 
+-- Community mode: invite-only join and persisted OAuth client registrations (also created at start-up).
+CREATE TABLE IF NOT EXISTS invites (
+  code_hash      TEXT        PRIMARY KEY,
+  inviter        TEXT        NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at     TIMESTAMPTZ NOT NULL,
+  used_at        TIMESTAMPTZ,
+  used_by        TEXT,
+  inviter_linked BOOLEAN     NOT NULL DEFAULT false,
+  invitee_linked BOOLEAN     NOT NULL DEFAULT false
+);
+ALTER TABLE members ADD COLUMN IF NOT EXISTS invited_by TEXT;
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id     TEXT        PRIMARY KEY,
+  redirect_uris JSONB       NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Per-pair message flags: star and archive (read/unread is the message's own accessed_at).
 CREATE TABLE IF NOT EXISTS post_flags (
   public_pi  TEXT        NOT NULL,

@@ -13,3 +13,6 @@ Thumbs.db
 .env.bak*
 
 .passkey.pem
+
+# game assets served by the tennis relay (not part of this repository)
+public/
